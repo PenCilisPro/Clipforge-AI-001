@@ -29,7 +29,7 @@ function parseCsv(file: File): Promise<Record<string, string>[]> {
       header: true,
       skipEmptyLines: true,
       complete: (result) => {
-        if (result.errors.length > 0 && result.data.length === 0) {
+        if (result.data.length === 0) {
           reject(new Error('Could not parse this CSV file.'))
           return
         }
