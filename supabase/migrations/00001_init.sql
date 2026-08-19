@@ -307,6 +307,12 @@ create policy "own render_jobs" on public.render_jobs
 create policy "own scheduled_posts" on public.scheduled_posts
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
+-- ---------- table grants ----------
+-- RLS policies filter rows, but the roles still need table privileges.
+grant usage on schema public to anon, authenticated, service_role;
+grant select, insert, update, delete on all tables in schema public to authenticated, service_role;
+grant usage, select on all sequences in schema public to authenticated, service_role;
+
 -- Social accounts: rows visible to owner, but token columns must only be read
 -- server-side (service role). A view without token columns is exposed instead.
 create policy "own social_accounts" on public.social_accounts
