@@ -3,6 +3,7 @@ import { Sparkles, Brain, Waypoints, Gauge } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import type { Clip, Project } from '@/lib/types'
 import { PageHeader, StatCard, LoadingState, ScoreBadge } from '@/components/ui'
+import PerformanceAnalysis from '@/components/PerformanceAnalysis'
 import { Link } from 'react-router-dom'
 
 const PIPELINE_STAGES = [
@@ -103,6 +104,10 @@ export default function AIPage() {
             ))}
           </div>
         </section>
+      </div>
+
+      <div className="mb-6">
+        <PerformanceAnalysis />
       </div>
 
       <section className="card p-5">

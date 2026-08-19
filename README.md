@@ -35,11 +35,11 @@ npm run dev
 ```bash
 supabase db push                 # applies supabase/migrations
 supabase functions deploy broll-search music-search process-video start-render \
-  oauth-start oauth-callback publish-post sync-analytics
+  oauth-start oauth-callback publish-post sync-analytics analyze-performance
 supabase secrets set PEXELS_API_KEY=... JAMENDO_CLIENT_ID=... \
   GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... \
   TIKTOK_CLIENT_KEY=... TIKTOK_CLIENT_SECRET=... \
-  YOUTUBE_API_KEY=... APP_URL=https://your-app.example
+  YOUTUBE_API_KEY=... OPENROUTER_API_KEY=... APP_URL=https://your-app.example
 ```
 
 Schedule `publish-post` and `sync-analytics` with Supabase cron for automatic
