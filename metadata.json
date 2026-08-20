@@ -1,0 +1,6 @@
+{
+  "name": "ClipForge AI",
+  "description": "AI-powered short-form video clip generation, editing, and publishing platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

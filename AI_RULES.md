@@ -1,0 +1,22 @@
+# Tech Stack & Library Usage Rules
+
+- **Framework**: React 18 with TypeScript
+- **Routing**: React Router v6 (keep routes in `src/App.tsx`)
+- **Styling**: Tailwind CSS (utility-first) – use Tailwind classes for layout, spacing, colors, typography, and responsive design
+- **UI Components**: shadcn/ui library (pre‑built, accessible components) – import and use as‑is; do not modify the source files; create new wrapper components if customization is needed
+- **Icons**: lucide-react – use for all icon needs
+- **State Management**: Prefer React hooks (`useState`, `useEffect`, `useContext`) for local state; for global state, use Zustand or Jotai only if explicitly approved
+- **Data Fetching**: Use React Query (tanstack/query) for server state; avoid manual fetch in components unless trivial
+- **Forms**: Use React Hook Form with Zod validation (via `zod` package) – keep validation schemas alongside forms
+- **Utilities**: Use `clsx` or `tailwind-merge` for conditional class merging; keep utility functions in `src/lib/`
+- **Testing**: Not required for this scaffold; if added, use Vitest and React Testing Library
+- **File Organization**:
+  - Pages: `src/pages/` (each route component)
+  - Components: `src/components/` (reusable UI pieces)
+  - Layouts: `src/layouts/` (if needed)
+  - Hooks: `src/hooks/`
+  - Lib/Utils: `src/lib/`
+  - Styles: `src/styles/` (global Tailwind config, custom CSS)
+- **Code Style**: Prefer functional components with TypeScript interfaces; keep components small and focused; export named components; use barrel exports sparingly
+- **Environment Variables**: Prefix with `VITE_` for client‑side access; keep secrets out of the repo
+- **Linting/Formatting**: ESLint with Next.js‑compatible rules and Prettier; run via `npm run lint` and `npm run format`
