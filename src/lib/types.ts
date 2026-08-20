@@ -299,6 +299,16 @@ export interface CaptionWordConfig {
   end: number
 }
 
+export interface VoiceoverConfig {
+  enabled: boolean
+  voiceId: string
+  actorName?: string
+  rate: number
+  pitch: number
+  volume: number
+  duckMusic: boolean
+}
+
 export interface ClipConfiguration {
   sourceVideo: string
   startTime: number
@@ -320,6 +330,8 @@ export interface ClipConfiguration {
     watermarkText: string | null
   }
   voiceVolume: number
+  voiceUrl?: string | null
+  voiceover?: VoiceoverConfig | null
 }
 
 export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
@@ -344,7 +356,7 @@ export function defaultClipConfiguration(
   endTime: number,
 ): ClipConfiguration {
   return {
-    sourceVideo,
+    sourceVideo: sourceVideo || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
     startTime: Number(startTime) || 0,
     endTime: Number(endTime) || (Number(startTime) || 0) + 30,
     aspectRatio: '9:16',
@@ -357,6 +369,16 @@ export function defaultClipConfiguration(
     overlays: [],
     branding: { logoUrl: null, watermarkText: null },
     voiceVolume: 1,
+    voiceUrl: null,
+    voiceover: {
+      enabled: true,
+      voiceId: 'alex-viral',
+      actorName: 'Alex (Viral TikTok Narrator)',
+      rate: 1.1,
+      pitch: 1.05,
+      volume: 1,
+      duckMusic: true,
+    },
   }
 }
 
@@ -393,12 +415,14 @@ export function normalizeClipConfiguration(
     sourceVideo = context.sourceUrl.trim()
   } else if (clip?.current_render_url) {
     sourceVideo = clip.current_render_url
+  } else if (clip?.current_thumbnail_url && (clip.current_thumbnail_url.endsWith('.mp4') || clip.current_thumbnail_url.endsWith('.webm'))) {
+    sourceVideo = clip.current_thumbnail_url
+  } else if (context?.thumbnailUrl && (context.thumbnailUrl.endsWith('.mp4') || context.thumbnailUrl.endsWith('.webm'))) {
+    sourceVideo = context.thumbnailUrl
   } else if (clip?.current_thumbnail_url) {
     sourceVideo = clip.current_thumbnail_url
-  } else if (context?.thumbnailUrl) {
-    sourceVideo = context.thumbnailUrl
   } else {
-    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'
+    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
   }
 
   // Safe Caption Style
@@ -483,6 +507,18 @@ export function normalizeClipConfiguration(
     subject: rawConfig?.crop?.subject || 'face',
   }
 
+  // Safe Voiceover
+  const rawVoice = rawConfig?.voiceover
+  const voiceover: VoiceoverConfig = {
+    enabled: rawVoice?.enabled !== false,
+    voiceId: rawVoice?.voiceId || 'alex-viral',
+    actorName: rawVoice?.actorName || 'Alex (Viral TikTok Narrator)',
+    rate: typeof rawVoice?.rate === 'number' ? rawVoice.rate : 1.1,
+    pitch: typeof rawVoice?.pitch === 'number' ? rawVoice.pitch : 1.05,
+    volume: typeof rawVoice?.volume === 'number' ? rawVoice.volume : 1,
+    duckMusic: rawVoice?.duckMusic !== false,
+  }
+
   return {
     sourceVideo,
     startTime,
@@ -504,6 +540,8 @@ export function normalizeClipConfiguration(
       watermarkText: rawConfig?.branding?.watermarkText || null,
     },
     voiceVolume: typeof rawConfig?.voiceVolume === 'number' ? rawConfig.voiceVolume : 1,
+    voiceUrl: rawConfig?.voiceUrl || null,
+    voiceover,
   }
 }
 

@@ -22,8 +22,14 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
 
   const fadeInFrames = (music.fadeIn || 0) * FPS
   const fadeOutFrames = (music.fadeOut || 0) * FPS
+  
+  // Smart Audio Ducking: If voiceover or voice is active, reduce music volume to 15-20%
+  const isDucking = config.voiceover?.duckMusic !== false
+  const duckMultiplier = isDucking ? 0.35 : 1.0
+
   const volume =
-    (music.volume ?? 0.5) *
+    (music.volume ?? 0.3) *
+    duckMultiplier *
     interpolate(frame, [0, Math.max(1, fadeInFrames)], [0, 1], {
       extrapolateLeft: 'clamp',
       extrapolateRight: 'clamp',
@@ -271,6 +277,14 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
         >
           {config.branding.watermarkText}
         </div>
+      )}
+
+      {/* Voice Narration Audio Track */}
+      {config?.voiceUrl && (
+        <Audio
+          src={config.voiceUrl}
+          volume={config.voiceVolume ?? 1}
+        />
       )}
 
       {/* Background Music */}

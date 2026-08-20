@@ -4,7 +4,7 @@ import { Film, RefreshCw, Sparkles, Loader2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { processProjectInBrowser } from '@/lib/clientProcessor'
 import type { Project, Video, Transcript, Clip } from '@/lib/types'
-import { defaultClipConfiguration } from '@/lib/types'
+import { normalizeClipConfiguration } from '@/lib/types'
 import { formatDuration, formatTimestamp } from '@/lib/format'
 import {
   PageHeader,
@@ -239,10 +239,16 @@ export default function ProjectDetail() {
               ) : (
                 <div className="w-full max-w-[280px]">
                   <RemotionPlayerPreview
-                    config={defaultClipConfiguration(
-                      previewClip.current_thumbnail_url || '',
-                      previewClip.start_time || 0,
-                      previewClip.end_time || 30,
+                    config={normalizeClipConfiguration(
+                      null,
+                      previewClip,
+                      {
+                        sourceUrl: project?.source_url || (video as any)?.storage_path,
+                        thumbnailUrl: previewClip.current_thumbnail_url || (project as any)?.thumbnail_url,
+                        storagePath: (video as any)?.storage_path,
+                        sourceType: project?.source_type,
+                        transcript,
+                      },
                     )}
                   />
                 </div>

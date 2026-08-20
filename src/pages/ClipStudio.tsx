@@ -21,6 +21,9 @@ import {
   Layers,
   CheckCircle2,
   Play,
+  Mic,
+  Volume2,
+  Square,
 } from 'lucide-react'
 import { supabase, invokeFunction } from '@/lib/supabase'
 import type {
@@ -45,8 +48,14 @@ import {
   getStoredApiKey,
   type StockVideoAsset,
 } from '@/lib/clipAiAssistant'
+import {
+  VOICE_ACTORS,
+  SPEAKER_VIDEO_PRESETS,
+  LiveVoiceSynthesizer,
+  generateSpeechAudioBlob,
+} from '@/lib/voiceSynthesis'
 
-type Tab = 'video' | 'captions' | 'broll' | 'music'
+type Tab = 'video' | 'captions' | 'voice' | 'broll' | 'music'
 type CaptionsSubTab = 'presets' | 'words' | 'whisper'
 
 interface BrollSearchResult {
@@ -191,6 +200,10 @@ export default function ClipStudio() {
   const [musicResults, setMusicResults] = useState<MusicSearchResult[]>([])
   const [musicSearching, setMusicSearching] = useState(false)
   const [musicError, setMusicError] = useState<string | null>(null)
+
+  // Voice & Audio state
+  const [testingVoice, setTestingVoice] = useState(false)
+  const [generatingVoiceBlob, setGeneratingVoiceBlob] = useState(false)
 
   const [previewMode, setPreviewMode] = useState<'live' | 'rendered'>('live')
 
@@ -546,6 +559,56 @@ export default function ClipStudio() {
     }
   }
 
+  // Voice narration script text derived from captions or hook
+  const scriptText = useMemo(() => {
+    if (config?.captions?.words && config.captions.words.length > 0) {
+      return config.captions.words.map((w) => w.text).join(' ')
+    }
+    if (clip?.hook) {
+      return `${clip.hook}. If you want to master this topic, stop making the same mistakes and focus on real execution.`
+    }
+    return 'Stop scrolling! Here is the exact reason why 99 percent of creators fail before they even start.'
+  }, [config?.captions?.words, clip])
+
+  // Live test of voice narration
+  function handleTestVoice(actorId?: string) {
+    if (LiveVoiceSynthesizer.speaking) {
+      LiveVoiceSynthesizer.stop()
+      setTestingVoice(false)
+      return
+    }
+
+    const voiceId = actorId || config?.voiceover?.voiceId || 'alex-viral'
+    const actor = VOICE_ACTORS.find((a) => a.id === voiceId) || VOICE_ACTORS[0]
+    setTestingVoice(true)
+
+    LiveVoiceSynthesizer.speak(scriptText, {
+      voiceId,
+      rate: config?.voiceover?.rate || actor.rate,
+      pitch: config?.voiceover?.pitch || actor.pitch,
+      volume: config?.voiceVolume ?? 1,
+      onEnd: () => setTestingVoice(false),
+    })
+  }
+
+  // Bake speech audio into clip waveform
+  async function handleBakeVoiceAudio() {
+    if (!config) return
+    setGeneratingVoiceBlob(true)
+    try {
+      const durationSec = Math.max(3, config.endTime - config.startTime)
+      const blobUrl = await generateSpeechAudioBlob(scriptText, durationSec)
+      if (blobUrl) {
+        update({ voiceUrl: blobUrl })
+        showNotification('Rendered AI Voice Narration waveform directly into clip!')
+      }
+    } catch (err) {
+      console.warn('Voice audio generation:', err)
+    } finally {
+      setGeneratingVoiceBlob(false)
+    }
+  }
+
   if (notFound) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[450px] p-6 text-center space-y-4">
@@ -852,10 +915,11 @@ export default function ClipStudio() {
 
         {/* RIGHT: Main Inspector Tabs */}
         <div className="card flex flex-col p-4 bg-surface-900 border-surface-800">
-          <div className="mb-4 flex border-b border-surface-700 pb-2">
+          <div className="mb-4 flex border-b border-surface-700 pb-2 overflow-x-auto">
             {(
               [
                 { id: 'captions', label: 'Captions', icon: Type },
+                { id: 'voice', label: 'Voice & Audio', icon: Mic },
                 { id: 'broll', label: 'B-Roll', icon: Film },
                 { id: 'video', label: 'Video', icon: VideoIcon },
                 { id: 'music', label: 'Music', icon: Music },
@@ -868,7 +932,7 @@ export default function ClipStudio() {
                   key={t.id}
                   onClick={() => setTab(t.id)}
                   className={classNames(
-                    'flex flex-1 items-center justify-center gap-1.5 border-b-2 py-2 text-xs font-semibold transition-colors',
+                    'flex flex-1 items-center justify-center gap-1.5 border-b-2 py-2 px-2 text-xs font-semibold whitespace-nowrap transition-colors',
                     active
                       ? 'border-brand-500 text-brand-400'
                       : 'border-transparent text-zinc-400 hover:text-zinc-200',
@@ -882,6 +946,265 @@ export default function ClipStudio() {
           </div>
 
           <div className="flex-1 space-y-4 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
+            {/* VOICE & AUDIO TAB */}
+            {tab === 'voice' && (
+              <div className="space-y-4">
+                {/* Voice Master Volume & Boost */}
+                <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Volume2 className="h-4 w-4 text-brand-400" />
+                      <label className="text-xs font-semibold text-white">Clip Voice Volume</label>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => update({ voiceVolume: 1.0 })}
+                        className="rounded bg-surface-750 px-2 py-0.5 text-[10px] font-medium text-zinc-300 hover:bg-surface-700"
+                      >
+                        100%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => update({ voiceVolume: 1.5 })}
+                        className="rounded bg-brand-500/20 px-2 py-0.5 text-[10px] font-medium text-brand-300 hover:bg-brand-500/30"
+                      >
+                        +50% Boost
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={0}
+                      max={1.5}
+                      step={0.05}
+                      value={config.voiceVolume ?? 1}
+                      onChange={(e) => update({ voiceVolume: Number(e.target.value) })}
+                      className="w-full accent-brand-500"
+                    />
+                    <span className="font-mono text-xs text-brand-400 w-12 text-right">
+                      {Math.round((config.voiceVolume ?? 1) * 100)}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* AI Voice Narration Persona Selector */}
+                <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-semibold text-white flex items-center gap-1.5">
+                        <Mic className="h-3.5 w-3.5 text-emerald-400" />
+                        AI Voice Narration
+                      </h4>
+                      <p className="text-[11px] text-zinc-400">
+                        Synchronized speaker voice speaking your clip captions
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={config.voiceover?.enabled !== false}
+                      onChange={(e) =>
+                        update({
+                          voiceover: {
+                            ...(config.voiceover || {
+                              voiceId: 'alex-viral',
+                              rate: 1.1,
+                              pitch: 1.05,
+                              volume: 1,
+                              duckMusic: true,
+                            }),
+                            enabled: e.target.checked,
+                          },
+                        })
+                      }
+                      className="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {config.voiceover?.enabled !== false && (
+                    <div className="space-y-3 pt-2">
+                      <label className="text-[11px] font-medium text-zinc-300">Choose Voice Actor Persona</label>
+                      <div className="grid grid-cols-1 gap-2">
+                        {VOICE_ACTORS.map((actor) => {
+                          const isSelected = (config.voiceover?.voiceId || 'alex-viral') === actor.id
+                          return (
+                            <div
+                              key={actor.id}
+                              onClick={() =>
+                                update({
+                                  voiceover: {
+                                    ...(config.voiceover || {
+                                      rate: actor.rate,
+                                      pitch: actor.pitch,
+                                      volume: 1,
+                                      duckMusic: true,
+                                    }),
+                                    enabled: true,
+                                    voiceId: actor.id,
+                                    actorName: actor.name,
+                                    rate: actor.rate,
+                                    pitch: actor.pitch,
+                                  },
+                                })
+                              }
+                              className={classNames(
+                                'cursor-pointer rounded-lg border p-2.5 transition-all flex items-start justify-between gap-2',
+                                isSelected
+                                  ? 'border-brand-500 bg-brand-500/10'
+                                  : 'border-surface-700 bg-surface-900/60 hover:border-surface-600',
+                              )}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-semibold text-white">{actor.name}</span>
+                                  <span className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] text-zinc-400">
+                                    {actor.accent}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-zinc-400 mt-0.5 leading-snug">{actor.description}</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  handleTestVoice(actor.id)
+                                }}
+                                className="rounded-lg bg-surface-800 p-1.5 text-zinc-300 hover:text-white hover:bg-surface-700 shrink-0"
+                                title="Preview this voice"
+                              >
+                                <Play className="h-3.5 w-3.5 fill-current" />
+                              </button>
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      {/* Speed & Pitch Controls */}
+                      <div className="grid grid-cols-2 gap-3 pt-2">
+                        <div>
+                          <label className="label text-[11px]">
+                            Speed ({config.voiceover?.rate ?? 1.1}x)
+                          </label>
+                          <input
+                            type="range"
+                            min={0.7}
+                            max={1.5}
+                            step={0.05}
+                            value={config.voiceover?.rate ?? 1.1}
+                            onChange={(e) =>
+                              update({
+                                voiceover: {
+                                  ...(config.voiceover || {
+                                    voiceId: 'alex-viral',
+                                    pitch: 1.05,
+                                    volume: 1,
+                                    duckMusic: true,
+                                    enabled: true,
+                                  }),
+                                  rate: Number(e.target.value),
+                                },
+                              })
+                            }
+                            className="w-full accent-brand-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="label text-[11px]">
+                            Pitch ({config.voiceover?.pitch ?? 1.05}x)
+                          </label>
+                          <input
+                            type="range"
+                            min={0.7}
+                            max={1.3}
+                            step={0.05}
+                            value={config.voiceover?.pitch ?? 1.05}
+                            onChange={(e) =>
+                              update({
+                                voiceover: {
+                                  ...(config.voiceover || {
+                                    voiceId: 'alex-viral',
+                                    rate: 1.1,
+                                    volume: 1,
+                                    duckMusic: true,
+                                    enabled: true,
+                                  }),
+                                  pitch: Number(e.target.value),
+                                },
+                              })
+                            }
+                            className="w-full accent-brand-500"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Smart Ducking Toggle */}
+                      <div className="flex items-center justify-between rounded-lg bg-surface-800 p-2.5 mt-2">
+                        <div>
+                          <p className="text-xs font-medium text-white">Smart Music Ducking</p>
+                          <p className="text-[10px] text-zinc-400">
+                            Lowers background music while voice speaks so dialogue is crystal clear
+                          </p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={config.voiceover?.duckMusic !== false}
+                          onChange={(e) =>
+                            update({
+                              voiceover: {
+                                ...(config.voiceover || {
+                                  voiceId: 'alex-viral',
+                                  rate: 1.1,
+                                  pitch: 1.05,
+                                  volume: 1,
+                                  enabled: true,
+                                }),
+                                duckMusic: e.target.checked,
+                              },
+                            })
+                          }
+                          className="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => handleTestVoice()}
+                          className={`btn-secondary !py-2 !px-3 text-xs flex-1 justify-center ${
+                            testingVoice ? 'bg-red-500/20 text-red-300 border-red-500/40' : ''
+                          }`}
+                        >
+                          {testingVoice ? (
+                            <>
+                              <Square className="h-3.5 w-3.5 fill-red-400" /> Stop Speech
+                            </>
+                          ) : (
+                            <>
+                              <Play className="h-3.5 w-3.5 fill-brand-400" /> Test Voice Live
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleBakeVoiceAudio()}
+                          disabled={generatingVoiceBlob}
+                          className="btn-primary !py-2 !px-3 text-xs flex-1 justify-center"
+                        >
+                          {generatingVoiceBlob ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="h-3.5 w-3.5" />
+                          )}
+                          Bake Speech Audio
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {/* CAPTIONS TAB */}
             {tab === 'captions' && (
               <div className="space-y-4">
@@ -1435,6 +1758,62 @@ export default function ClipStudio() {
             {/* VIDEO CROP & SPEED TAB */}
             {tab === 'video' && (
               <div className="space-y-4">
+                {/* Speaker Backdrop Presets */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-semibold text-white flex items-center gap-1.5">
+                      <VideoIcon className="h-3.5 w-3.5 text-brand-400" />
+                      Speaker Video Backdrops
+                    </label>
+                    <span className="text-[10px] text-zinc-400">High quality video with voice audio</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {SPEAKER_VIDEO_PRESETS.map((preset) => {
+                      const isCurrent = config.sourceVideo === preset.videoUrl
+                      return (
+                        <div
+                          key={preset.id}
+                          onClick={() => {
+                            update({ sourceVideo: preset.videoUrl })
+                            showNotification(`Applied "${preset.title}" video backdrop!`)
+                          }}
+                          className={classNames(
+                            'group relative cursor-pointer overflow-hidden rounded-lg border p-2 transition-all flex flex-col',
+                            isCurrent
+                              ? 'border-brand-500 bg-brand-500/10'
+                              : 'border-surface-700 bg-surface-850 hover:border-surface-600',
+                          )}
+                        >
+                          <div className="relative aspect-video w-full overflow-hidden rounded bg-black mb-1.5">
+                            <img
+                              src={preset.thumbnailUrl}
+                              alt={preset.title}
+                              className="h-full w-full object-cover group-hover:scale-105 transition-transform"
+                            />
+                            <div className="absolute top-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[8px] font-semibold text-brand-400 uppercase">
+                              {preset.category}
+                            </div>
+                          </div>
+                          <span className="text-[11px] font-semibold text-white truncate">{preset.title}</span>
+                          <span className="text-[10px] text-zinc-400 truncate">{preset.speaker}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Custom Video URL */}
+                <div>
+                  <label className="label text-xs">Custom Video Source URL (.mp4 / .webm)</label>
+                  <input
+                    type="text"
+                    className="input text-xs"
+                    value={config.sourceVideo || ''}
+                    placeholder="https://example.com/video.mp4"
+                    onChange={(e) => update({ sourceVideo: e.target.value })}
+                  />
+                </div>
+
                 <div>
                   <label className="label">Crop Framing Mode</label>
                   <select
