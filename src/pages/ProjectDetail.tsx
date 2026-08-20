@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { Film, RefreshCw, Sparkles, Loader2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { processProjectInBrowser } from '@/lib/clientProcessor'
 import type { Project, Video, Transcript, Clip } from '@/lib/types'
+import { defaultClipConfiguration } from '@/lib/types'
 import { formatDuration, formatTimestamp } from '@/lib/format'
 import {
   PageHeader,
@@ -13,6 +14,7 @@ import {
 } from '@/components/ui'
 import ClipCard from '@/components/ClipCard'
 import { ProcessingProgressTracker } from '@/components/ProcessingProgressTracker'
+import { RemotionPlayerPreview } from '@/components/remotion/RemotionPlayerPreview'
 
 type SortKey = 'score' | 'duration' | 'pattern' | 'status'
 
@@ -222,15 +224,54 @@ export default function ProjectDetail() {
       <Modal
         open={Boolean(previewClip)}
         onClose={() => setPreviewClip(null)}
-        title={previewClip?.title ?? ''}
+        title={previewClip?.title ?? 'Clip Preview'}
       >
-        {previewClip?.current_render_url && (
-          <video
-            src={previewClip.current_render_url}
-            controls
-            autoPlay
-            className="mx-auto max-h-[70vh] rounded-lg"
-          />
+        {previewClip && (
+          <div className="space-y-4">
+            <div className="flex justify-center py-2">
+              {previewClip.current_render_url ? (
+                <video
+                  src={previewClip.current_render_url}
+                  controls
+                  autoPlay
+                  className="aspect-[9/16] w-full max-w-[280px] rounded-xl bg-black object-contain shadow-2xl"
+                />
+              ) : (
+                <div className="w-full max-w-[280px]">
+                  <RemotionPlayerPreview
+                    config={defaultClipConfiguration(
+                      previewClip.current_thumbnail_url || '',
+                      previewClip.start_time || 0,
+                      previewClip.end_time || 30,
+                    )}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-lg bg-surface-850 p-3 text-xs space-y-1.5">
+              {previewClip.hook && (
+                <p className="text-zinc-300">
+                  <span className="font-semibold text-brand-400">Viral Hook:</span> &ldquo;{previewClip.hook}&rdquo;
+                </p>
+              )}
+              {previewClip.matched_pattern_name && (
+                <p className="text-zinc-400">
+                  <span className="font-semibold text-zinc-300">Pattern:</span> {previewClip.matched_pattern_name}
+                </p>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <Link
+                to={`/clips/${previewClip.id}/studio`}
+                className="btn-primary flex-1 justify-center !py-2 text-xs"
+                onClick={() => setPreviewClip(null)}
+              >
+                <Sparkles className="h-4 w-4" /> Open in Remotion Clip Studio
+              </Link>
+            </div>
+          </div>
         )}
       </Modal>
 

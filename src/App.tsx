@@ -17,6 +17,7 @@ import PatternLibrary from '@/pages/PatternLibrary'
 import CSVImport from '@/pages/CSVImport'
 import Analytics from '@/pages/Analytics'
 import SettingsPage from '@/pages/SettingsPage'
+import PrivacyPolicy from '@/pages/PrivacyPolicy'
 
 export default function App() {
   if (!isSupabaseConfigured) {
@@ -59,6 +60,7 @@ export default function App() {
               <Route path="/csv-import" element={<CSVImport />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/privacy" element={<PrivacyPolicy />} />
             </Route>
           </Route>
         </Routes>

@@ -55,9 +55,9 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const scale = config.crop.scale ?? 1
 
   return (
-    <AbsoluteFill style={{ backgroundColor: '#000' }}>
-      {/* Base Video */}
-      {config.sourceVideo && (
+    <AbsoluteFill style={{ backgroundColor: '#0B0F19' }}>
+      {/* Base Video / Backdrop */}
+      {config.sourceVideo && (config.sourceVideo.endsWith('.mp4') || config.sourceVideo.endsWith('.webm') || config.sourceVideo.includes('blob:')) ? (
         <AbsoluteFill>
           <Video
             src={config.sourceVideo}
@@ -71,6 +71,38 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
               objectFit: 'cover',
               objectPosition: `${cropX * 100}% ${cropY * 100}%`,
               transform: `scale(${scale})`,
+            }}
+          />
+        </AbsoluteFill>
+      ) : config.sourceVideo ? (
+        <AbsoluteFill>
+          <Img
+            src={config.sourceVideo}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              transform: `scale(${scale * 1.05})`,
+              filter: 'brightness(0.85)',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'linear-gradient(to bottom, rgba(0,0,0,0.3) 0%, transparent 40%, rgba(0,0,0,0.85) 100%)',
+            }}
+          />
+        </AbsoluteFill>
+      ) : (
+        <AbsoluteFill style={{ background: 'radial-gradient(circle at center, #1e1b4b 0%, #030712 100%)' }}>
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              opacity: 0.15,
+              backgroundImage: 'radial-gradient(#6366f1 1px, transparent 1px)',
+              backgroundSize: '32px 32px',
             }}
           />
         </AbsoluteFill>

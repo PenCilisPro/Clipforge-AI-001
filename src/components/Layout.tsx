@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Link, Outlet } from 'react-router-dom'
 import {
   LayoutDashboard,
   PlusCircle,
@@ -12,6 +12,7 @@ import {
   FileSpreadsheet,
   BarChart3,
   Settings,
+  Shield,
   LogOut,
   Menu,
   X,
@@ -102,6 +103,17 @@ export default function Layout() {
         <div className="flex items-center gap-2">
           <ConnectionDot connected={isConnected('tiktok')} />
           TikTok {isConnected('tiktok') ? 'Connected' : 'Not connected'}
+        </div>
+        <div className="mt-2.5 pt-2 border-t border-surface-800 flex items-center justify-between">
+          <Link
+            to="/privacy"
+            onClick={() => setMobileOpen(false)}
+            className="flex items-center gap-1.5 text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors"
+          >
+            <Shield className="h-3 w-3 text-brand-400" />
+            Privacy Policy
+          </Link>
+          <span className="text-[10px] text-zinc-600">v2.4.0</span>
         </div>
       </div>
 

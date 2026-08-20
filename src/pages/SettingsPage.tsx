@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { KeyRound, Link2, RefreshCw, Unlink, User } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { KeyRound, Link2, RefreshCw, Unlink, User, Shield, ExternalLink } from 'lucide-react'
 import { TikTokIcon, YoutubeIcon } from '@/components/icons'
 import { format, parseISO } from 'date-fns'
 import { useAuth } from '@/hooks/useAuth'
@@ -199,6 +200,22 @@ export default function SettingsPage() {
             are configured as Supabase Edge Function secrets and never leave the server.
           </p>
         </div>
+      </div>
+
+      <div className="card p-4 bg-surface-900 border-surface-800 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <Shield className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">Privacy Policy & Data Security</h3>
+            <p className="text-xs text-zinc-400">Learn how your media files, transcripts, and account credentials are protected.</p>
+          </div>
+        </div>
+        <Link to="/privacy" className="btn-secondary text-xs">
+          <span>Read Policy</span>
+          <ExternalLink className="h-3.5 w-3.5" />
+        </Link>
       </div>
     </div>
   )
