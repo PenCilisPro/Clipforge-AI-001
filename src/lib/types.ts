@@ -345,13 +345,13 @@ export function defaultClipConfiguration(
 ): ClipConfiguration {
   return {
     sourceVideo,
-    startTime,
-    endTime,
+    startTime: Number(startTime) || 0,
+    endTime: Number(endTime) || (Number(startTime) || 0) + 30,
     aspectRatio: '9:16',
     resolution: { width: 1080, height: 1920 },
     speed: 1,
     crop: { mode: 'smart', x: 0.5, y: 0.5, scale: 1, subject: 'face' },
-    captions: { enabled: true, style: DEFAULT_CAPTION_STYLE, words: [] },
+    captions: { enabled: true, style: { ...DEFAULT_CAPTION_STYLE }, words: [] },
     broll: [],
     music: null,
     overlays: [],
@@ -359,3 +359,187 @@ export function defaultClipConfiguration(
     voiceVolume: 1,
   }
 }
+
+/**
+ * Normalizes any stored or partial clip configuration into a complete, safe ClipConfiguration
+ * that guarantees Remotion will render the best clipped moment smoothly with no blank screens.
+ */
+export function normalizeClipConfiguration(
+  rawConfig: any,
+  clip?: Clip | null,
+  context?: {
+    sourceUrl?: string | null
+    thumbnailUrl?: string | null
+    storagePath?: string | null
+    sourceType?: string | null
+    transcript?: Transcript | null
+  } | null,
+): ClipConfiguration {
+  const startTime = typeof rawConfig?.startTime === 'number' && !isNaN(rawConfig.startTime)
+    ? rawConfig.startTime
+    : (clip?.start_time ?? 0)
+
+  const endTime = typeof rawConfig?.endTime === 'number' && !isNaN(rawConfig.endTime) && rawConfig.endTime > startTime
+    ? rawConfig.endTime
+    : (clip?.end_time ?? (startTime + 30))
+
+  // Determine the best source video / background
+  let sourceVideo = ''
+  if (typeof rawConfig?.sourceVideo === 'string' && rawConfig.sourceVideo.trim()) {
+    sourceVideo = rawConfig.sourceVideo.trim()
+  } else if (context?.storagePath && context.storagePath.trim()) {
+    sourceVideo = context.storagePath.trim()
+  } else if (context?.sourceUrl && (context.sourceUrl.endsWith('.mp4') || context.sourceUrl.endsWith('.webm') || context.sourceUrl.includes('blob:'))) {
+    sourceVideo = context.sourceUrl.trim()
+  } else if (clip?.current_render_url) {
+    sourceVideo = clip.current_render_url
+  } else if (clip?.current_thumbnail_url) {
+    sourceVideo = clip.current_thumbnail_url
+  } else if (context?.thumbnailUrl) {
+    sourceVideo = context.thumbnailUrl
+  } else {
+    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'
+  }
+
+  // Safe Caption Style
+  const rawStyle = rawConfig?.captions?.style || {}
+  const style: CaptionStyle = {
+    preset: rawStyle.preset || rawConfig?.captions?.preset || DEFAULT_CAPTION_STYLE.preset,
+    font: rawStyle.font || DEFAULT_CAPTION_STYLE.font,
+    fontSize: typeof rawStyle.fontSize === 'number' ? rawStyle.fontSize : DEFAULT_CAPTION_STYLE.fontSize,
+    weight: typeof rawStyle.weight === 'number' ? rawStyle.weight : DEFAULT_CAPTION_STYLE.weight,
+    position: rawStyle.position || DEFAULT_CAPTION_STYLE.position,
+    animation: rawStyle.animation || DEFAULT_CAPTION_STYLE.animation,
+    highlightColor: rawStyle.highlightColor || DEFAULT_CAPTION_STYLE.highlightColor,
+    textColor: rawStyle.textColor || DEFAULT_CAPTION_STYLE.textColor,
+    background: rawStyle.background !== undefined ? rawStyle.background : DEFAULT_CAPTION_STYLE.background,
+    strokeColor: rawStyle.strokeColor || DEFAULT_CAPTION_STYLE.strokeColor,
+    strokeWidth: typeof rawStyle.strokeWidth === 'number' ? rawStyle.strokeWidth : DEFAULT_CAPTION_STYLE.strokeWidth,
+    alignment: rawStyle.alignment || DEFAULT_CAPTION_STYLE.alignment,
+    lineSpacing: typeof rawStyle.lineSpacing === 'number' ? rawStyle.lineSpacing : DEFAULT_CAPTION_STYLE.lineSpacing,
+  }
+
+  // Safe Words: extract or generate if empty
+  let words: CaptionWordConfig[] = []
+  if (Array.isArray(rawConfig?.captions?.words) && rawConfig.captions.words.length > 0) {
+    words = rawConfig.captions.words.map((w: any) => ({
+      text: String(w.text || w.word || '').trim(),
+      start: Number(w.start) || 0,
+      end: Number(w.end) || (Number(w.start) || 0) + 0.3,
+    })).filter((w: CaptionWordConfig) => w.text.length > 0)
+  }
+
+  // If words are still empty, build words from transcript or hook
+  if (words.length === 0 && clip) {
+    const duration = Math.max(3, endTime - startTime)
+    const hook = clip.hook || `Here is the secret about ${clip.title}`
+    const body = `If you want to master ${clip.topic || 'this'}, you must stop making the same mistakes. Focus on real execution every single day.`
+    const sentence = `${hook}. ${body}`
+    const rawList = sentence.split(/\s+/).filter(Boolean)
+    const pacing = Math.min(0.45, Math.max(0.22, duration / (rawList.length + 4)))
+    let current = 0.1
+    for (let i = 0; i < rawList.length && current < duration - 0.2; i++) {
+      const w = rawList[i]
+      const wDur = Math.max(0.18, w.length * 0.05 + (pacing - 0.1))
+      const wEnd = Math.min(duration, current + wDur)
+      words.push({
+        text: w,
+        start: Number(current.toFixed(2)),
+        end: Number(wEnd.toFixed(2)),
+      })
+      current = Number((wEnd + 0.06).toFixed(2))
+    }
+  }
+
+  // Safe B-Roll
+  const broll: BrollConfigItem[] = Array.isArray(rawConfig?.broll)
+    ? rawConfig.broll.map((b: any) => ({
+        videoUrl: String(b.videoUrl || ''),
+        startAt: Number(b.startAt) || 0,
+        duration: Number(b.duration) || 3,
+        provider: String(b.provider || 'stock'),
+        query: b.query ? String(b.query) : null,
+      })).filter((b: BrollConfigItem) => Boolean(b.videoUrl))
+    : []
+
+  // Safe Overlays
+  const overlays: OverlayConfig[] = Array.isArray(rawConfig?.overlays)
+    ? rawConfig.overlays.map((o: any) => ({
+        type: 'text' as const,
+        text: String(o.text || ''),
+        position: o.position || 'bottom',
+        startAt: Number(o.startAt) || 0,
+        duration: Number(o.duration) || 3,
+        color: String(o.color || '#ffffff'),
+      }))
+    : []
+
+  // Safe Crop
+  const crop: CropConfig = {
+    mode: rawConfig?.crop?.mode || 'smart',
+    x: typeof rawConfig?.crop?.x === 'number' ? rawConfig?.crop?.x : 0.5,
+    y: typeof rawConfig?.crop?.y === 'number' ? rawConfig?.crop?.y : 0.5,
+    scale: typeof rawConfig?.crop?.scale === 'number' ? rawConfig?.crop?.scale : 1,
+    subject: rawConfig?.crop?.subject || 'face',
+  }
+
+  return {
+    sourceVideo,
+    startTime,
+    endTime,
+    aspectRatio: '9:16',
+    resolution: { width: 1080, height: 1920 },
+    speed: typeof rawConfig?.speed === 'number' && rawConfig.speed > 0 ? rawConfig.speed : 1,
+    crop,
+    captions: {
+      enabled: rawConfig?.captions?.enabled !== false,
+      style,
+      words,
+    },
+    broll,
+    music: rawConfig?.music && typeof rawConfig.music === 'object' && rawConfig.music.audioUrl ? rawConfig.music : null,
+    overlays,
+    branding: {
+      logoUrl: rawConfig?.branding?.logoUrl || null,
+      watermarkText: rawConfig?.branding?.watermarkText || null,
+    },
+    voiceVolume: typeof rawConfig?.voiceVolume === 'number' ? rawConfig.voiceVolume : 1,
+  }
+}
+
+export type FeedbackCategory =
+  | 'bug'
+  | 'feature'
+  | 'video_quality'
+  | 'captions'
+  | 'ui_ux'
+  | 'performance'
+  | 'general'
+
+export type FeedbackStatus = 'pending' | 'in_review' | 'resolved' | 'planned' | 'archived'
+
+export interface UserFeedback {
+  id: string
+  user_id?: string
+  user_email: string
+  user_name?: string
+  category: FeedbackCategory
+  rating: number // 1 to 5
+  subject: string
+  message: string
+  device_info?: string
+  status: FeedbackStatus
+  admin_notes?: string
+  admin_reply?: string
+  created_at: string
+  updated_at?: string
+  is_read?: boolean
+}
+
+export const ADMIN_FEEDBACK_EMAIL = 'pencilmacro@gmail.com'
+
+export const isFeedbackAdmin = (email?: string | null): boolean => {
+  if (!email) return false
+  return email.trim().toLowerCase() === ADMIN_FEEDBACK_EMAIL.toLowerCase()
+}
+

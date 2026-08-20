@@ -68,17 +68,26 @@ export const STOCK_BROLL_CATALOG: StockVideoAsset[] = [
   },
 ]
 
-const getFallbackAiKey = () => {
+const USER_NVIDIA_KEY = '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'
+
+export const getStoredApiKey = (): string => {
   try {
-    return atob('c2stb3ItdjEtNTExNWVmNDNhNjJhYjFiNjAxY2M1NTZmYjU3Y2RlZmVkMWQ5N2VhNTNlMmJlN2FkM2IxOGUwYzkzNjY1NGFiOQ==')
+    const saved = localStorage.getItem('clipforge_openai_key')
+    if (saved && saved.trim()) return saved.trim()
+    localStorage.setItem('clipforge_openai_key', USER_NVIDIA_KEY)
+    return USER_NVIDIA_KEY
   } catch {
-    return ''
+    return USER_NVIDIA_KEY
   }
+}
+
+const getFallbackAiKey = () => {
+  return getStoredApiKey()
 }
 
 /**
  * Generate synchronized word-level captions for a clip interval.
- * Supports OpenAI Whisper verbose_json API or AI Semantic Speech Timing Engine.
+ * Supports OpenAI Whisper verbose_json API, NVIDIA NIM Whisper API, or AI Semantic Speech Timing Engine.
  */
 export async function generateWhisperCaptions({
   clip,
@@ -94,21 +103,28 @@ export async function generateWhisperCaptions({
   const clipDuration = Math.max(3, clip.duration || clip.end_time - clip.start_time || 30)
   const apiKey =
     customApiKey?.trim() ||
+    getStoredApiKey() ||
     (typeof import.meta !== 'undefined' &&
       (import.meta.env?.VITE_OPENAI_API_KEY || import.meta.env?.VITE_OPENROUTER_API_KEY)) ||
-    getFallbackAiKey()
+    USER_NVIDIA_KEY
 
-  // 1. If an actual audio file was passed, call official OpenAI Whisper endpoint
-  if (whisperAudioFile && apiKey.startsWith('sk-')) {
+  // 1. If an actual audio file was passed, call official OpenAI or NVIDIA NIM Whisper endpoint
+  if (whisperAudioFile) {
     try {
+      const isNvidia = apiKey.startsWith('nvapi-')
+      const endpoint = isNvidia
+        ? 'https://integrate.api.nvidia.com/v1/audio/transcriptions'
+        : 'https://api.openai.com/v1/audio/transcriptions'
+      const model = isNvidia ? 'openai/whisper-large-v3-turbo' : 'whisper-1'
+
       const formData = new FormData()
       formData.append('file', whisperAudioFile)
-      formData.append('model', 'whisper-1')
+      formData.append('model', model)
       formData.append('response_format', 'verbose_json')
       formData.append('timestamp_granularities[]', 'word')
       if (language) formData.append('language', language)
 
-      const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      const whisperRes = await fetch(endpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -131,7 +147,7 @@ export async function generateWhisperCaptions({
     }
   }
 
-  // 2. AI Timing & Speech Reconstruction (Uses GPT-4o-mini / OpenRouter with viral cadence)
+  // 2. AI Timing & Speech Reconstruction (Uses NVIDIA NIM Llama-3.1 / OpenAI GPT-4o-mini with viral cadence)
   const prompt = `You are OpenAI Whisper & Viral Speech Timing Engine.
 A creator needs precise, word-by-word synced caption timestamps for a viral 9:16 short clip.
 
@@ -169,12 +185,20 @@ Example JSON output:
 }`
 
   try {
+    const isNvidia = apiKey.startsWith('nvapi-')
     const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
-    const endpoint = isDirectOpenAi
-      ? 'https://api.openai.com/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions'
 
-    const modelName = isDirectOpenAi ? 'gpt-4o-mini' : 'openai/gpt-4o-mini'
+    const endpoint = isNvidia
+      ? 'https://integrate.api.nvidia.com/v1/chat/completions'
+      : isDirectOpenAi
+        ? 'https://api.openai.com/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions'
+
+    const modelName = isNvidia
+      ? 'meta/llama-3.1-70b-instruct'
+      : isDirectOpenAi
+        ? 'gpt-4o-mini'
+        : 'openai/gpt-4o-mini'
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -190,7 +214,7 @@ Example JSON output:
         messages: [
           {
             role: 'system',
-            content: 'You are an elite speech transcription and word-level timestamping model. Always output strict JSON.',
+            content: 'You are an elite speech transcription and word-level timestamping model. Always output strict JSON with a "words" array.',
           },
           { role: 'user', content: prompt },
         ],
@@ -306,10 +330,20 @@ Respond with strict JSON in this format:
 }`
 
   try {
+    const isNvidia = apiKey.startsWith('nvapi-')
     const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
-    const endpoint = isDirectOpenAi
-      ? 'https://api.openai.com/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions'
+
+    const endpoint = isNvidia
+      ? 'https://integrate.api.nvidia.com/v1/chat/completions'
+      : isDirectOpenAi
+        ? 'https://api.openai.com/v1/chat/completions'
+        : 'https://openrouter.ai/api/v1/chat/completions'
+
+    const modelName = isNvidia
+      ? 'meta/llama-3.1-70b-instruct'
+      : isDirectOpenAi
+        ? 'gpt-4o-mini'
+        : 'openai/gpt-4o-mini'
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -320,7 +354,7 @@ Respond with strict JSON in this format:
         'X-Title': 'ClipForge AI BRoll',
       },
       body: JSON.stringify({
-        model: isDirectOpenAi ? 'gpt-4o-mini' : 'openai/gpt-4o-mini',
+        model: modelName,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: 'You are an AI video director. Always output strict JSON.' },

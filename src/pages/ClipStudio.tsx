@@ -32,7 +32,7 @@ import type {
   ClipVersion,
   RenderJob,
 } from '@/lib/types'
-import { defaultClipConfiguration } from '@/lib/types'
+import { normalizeClipConfiguration } from '@/lib/types'
 import { saveConfigurationAsVersion, createRenderJob } from '@/lib/render'
 import { classNames, formatDuration, formatTimestamp } from '@/lib/format'
 import { LoadingState, ProgressBar } from '@/components/ui'
@@ -42,6 +42,7 @@ import {
   autoGenerateBrollWithAi,
   STOCK_BROLL_CATALOG,
   parseWhisperJson,
+  getStoredApiKey,
   type StockVideoAsset,
 } from '@/lib/clipAiAssistant'
 
@@ -161,6 +162,8 @@ export default function ClipStudio() {
   const [versions, setVersions] = useState<ClipVersion[]>([])
   const [activeJob, setActiveJob] = useState<RenderJob | null>(null)
   const [tab, setTab] = useState<Tab>('captions')
+  const [loading, setLoading] = useState(true)
+  const [notFound, setNotFound] = useState(false)
   const [captionsSubTab, setCaptionsSubTab] = useState<CaptionsSubTab>('presets')
   const [saving, setSaving] = useState(false)
   const [rendering, setRendering] = useState(false)
@@ -168,13 +171,7 @@ export default function ClipStudio() {
   const [showHistory, setShowHistory] = useState(false)
 
   // AI Captions & Whisper State
-  const [openAiKey, setOpenAiKey] = useState<string>(() => {
-    try {
-      return localStorage.getItem('clipforge_openai_key') || ''
-    } catch {
-      return ''
-    }
-  })
+  const [openAiKey, setOpenAiKey] = useState<string>(() => getStoredApiKey())
   const [generatingCaptions, setGeneratingCaptions] = useState(false)
   const [generatingBroll, setGeneratingBroll] = useState(false)
   const [magicPolishing, setMagicPolishing] = useState(false)
@@ -204,41 +201,64 @@ export default function ClipStudio() {
 
   const load = useCallback(async () => {
     if (!clipId) return
-    const [clipRes, versionsRes, jobsRes] = await Promise.all([
-      supabase.from('clips').select('*').eq('id', clipId).single(),
-      supabase
-        .from('clip_versions')
-        .select('*')
-        .eq('clip_id', clipId)
-        .order('version_number', { ascending: false }),
-      supabase
-        .from('render_jobs')
-        .select('*')
-        .eq('clip_id', clipId)
-        .in('status', ['QUEUED', 'PREPARING', 'RENDERING', 'UPLOADING'])
-        .order('created_at', { ascending: false })
-        .limit(1),
-    ])
-    const loadedClip = clipRes.data as Clip | null
-    const loadedVersions = (versionsRes.data as ClipVersion[]) ?? []
-    setClip(loadedClip)
-    setVersions(loadedVersions)
-    setActiveJob(((jobsRes.data as RenderJob[]) ?? [])[0] ?? null)
+    try {
+      const [clipRes, versionsRes, jobsRes] = await Promise.all([
+        supabase.from('clips').select('*').eq('id', clipId).maybeSingle(),
+        supabase
+          .from('clip_versions')
+          .select('*')
+          .eq('clip_id', clipId)
+          .order('version_number', { ascending: false }),
+        supabase
+          .from('render_jobs')
+          .select('*')
+          .eq('clip_id', clipId)
+          .in('status', ['QUEUED', 'PREPARING', 'RENDERING', 'UPLOADING'])
+          .order('created_at', { ascending: false })
+          .limit(1),
+      ])
 
-    setConfig((prev) => {
-      if (prev) return prev
-      const current =
-        loadedVersions.find((v) => v.id === loadedClip?.current_version_id) ?? loadedVersions[0]
-      if (current && Object.keys(current.configuration_json).length > 0)
-        return current.configuration_json
-      if (loadedClip)
-        return defaultClipConfiguration(
-          loadedClip.current_thumbnail_url || '',
-          loadedClip.start_time,
-          loadedClip.end_time,
+      const loadedClip = clipRes.data as Clip | null
+      if (!loadedClip) {
+        setNotFound(true)
+        setLoading(false)
+        return
+      }
+
+      // Also retrieve parent project & video & transcript if available for perfect video/captions synchronization
+      const [projectRes, videoRes, transcriptRes] = await Promise.all([
+        supabase.from('projects').select('*').eq('id', loadedClip.project_id).maybeSingle(),
+        supabase.from('videos').select('*').eq('project_id', loadedClip.project_id).maybeSingle(),
+        supabase.from('transcripts').select('*').eq('project_id', loadedClip.project_id).maybeSingle(),
+      ])
+
+      const loadedVersions = (versionsRes.data as ClipVersion[]) ?? []
+      setClip(loadedClip)
+      setVersions(loadedVersions)
+      setActiveJob(((jobsRes.data as RenderJob[]) ?? [])[0] ?? null)
+
+      setConfig((prev) => {
+        if (prev) return prev
+        const current =
+          loadedVersions.find((v) => v.id === loadedClip?.current_version_id) ?? loadedVersions[0]
+
+        return normalizeClipConfiguration(
+          current?.configuration_json,
+          loadedClip,
+          {
+            sourceUrl: (projectRes.data as any)?.source_url || (videoRes.data as any)?.storage_path,
+            thumbnailUrl: loadedClip.current_thumbnail_url || (projectRes.data as any)?.thumbnail_url,
+            storagePath: (videoRes.data as any)?.storage_path,
+            sourceType: (projectRes.data as any)?.source_type,
+            transcript: transcriptRes.data as any,
+          },
         )
-      return prev
-    })
+      })
+    } catch (err) {
+      console.error('Error loading clip in ClipStudio:', err)
+    } finally {
+      setLoading(false)
+    }
   }, [clipId])
 
   useEffect(() => {
@@ -526,7 +546,24 @@ export default function ClipStudio() {
     }
   }
 
-  if (!clip || !config) return <LoadingState />
+  if (notFound) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full min-h-[450px] p-6 text-center space-y-4">
+        <div className="rounded-full bg-surface-800 p-4 text-zinc-400">
+          <Film className="h-10 w-10 text-brand-400" />
+        </div>
+        <h2 className="text-xl font-bold text-white">Clip Not Found</h2>
+        <p className="text-sm text-zinc-400 max-w-md">
+          The requested short clip could not be located in your database. It might have been deleted or the link is invalid.
+        </p>
+        <Link to="/projects" className="btn-primary !px-4 !py-2 text-xs">
+          Return to Projects
+        </Link>
+      </div>
+    )
+  }
+
+  if (loading || !clip || !config) return <LoadingState />
 
   const filteredStockCatalog = selectedStockCategory === 'all'
     ? STOCK_BROLL_CATALOG
@@ -1103,28 +1140,63 @@ export default function ClipStudio() {
                 {captionsSubTab === 'whisper' && (
                   <div className="space-y-4">
                     {/* API Key Card */}
-                    <div className="rounded-lg bg-surface-850 p-3 border border-surface-700 space-y-2">
+                    <div className="rounded-lg bg-surface-850 p-3.5 border border-surface-700 space-y-3">
                       <div className="flex items-center justify-between">
-                        <label className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
-                          <Key className="h-3.5 w-3.5 text-brand-400" /> OpenAI Whisper API Key
+                        <label className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                          <Key className="h-3.5 w-3.5 text-brand-400" /> Whisper AI API Key
                         </label>
-                        {whisperKeySavedNotice && (
-                          <span className="text-[11px] text-emerald-400 flex items-center gap-1">
-                            <Check className="h-3 w-3" /> Saved
+                        {openAiKey.startsWith('nvapi-') ? (
+                          <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
+                            <Check className="h-3 w-3" /> NVIDIA Whisper NIM Active
                           </span>
-                        )}
+                        ) : openAiKey.startsWith('sk-') ? (
+                          <span className="text-[11px] font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/30 flex items-center gap-1">
+                            <Check className="h-3 w-3" /> OpenAI Key Active
+                          </span>
+                        ) : null}
                       </div>
                       <p className="text-[11px] text-zinc-400">
-                        Enter your OpenAI API Key (sk-...) to transcribe audio files directly with Whisper-1 verbose_json word timings.
+                        Configured with NVIDIA NIM Whisper API & OpenAI. Powers automatic word-by-word synchronized caption generation.
                       </p>
                       <div className="flex gap-2">
                         <input
                           type="password"
-                          placeholder="sk-..."
+                          placeholder="nvapi-... or sk-..."
                           value={openAiKey}
                           onChange={(e) => handleSaveOpenAiKey(e.target.value)}
                           className="input flex-1 text-xs font-mono"
                         />
+                        <button
+                          onClick={() => {
+                            const defaultKey = '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'
+                            handleSaveOpenAiKey(defaultKey)
+                          }}
+                          className="btn-secondary !px-2.5 !py-1 text-[11px]"
+                          title="Reset to your provided NVIDIA NIM Whisper key"
+                        >
+                          Default
+                        </button>
+                      </div>
+
+                      {whisperKeySavedNotice && (
+                        <p className="text-[11px] text-emerald-400 flex items-center gap-1">
+                          <Check className="h-3 w-3" /> Saved key to browser storage
+                        </p>
+                      )}
+
+                      <div className="pt-1">
+                        <button
+                          onClick={() => void handleGenerateCaptions()}
+                          disabled={generatingCaptions}
+                          className="btn-primary w-full !py-2 text-xs justify-center flex items-center gap-1.5"
+                        >
+                          {generatingCaptions ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                          )}
+                          {generatingCaptions ? 'Transcribing Word Sync...' : 'Generate Synced Captions with Whisper Now'}
+                        </button>
                       </div>
                     </div>
 

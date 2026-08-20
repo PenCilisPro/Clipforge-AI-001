@@ -15,7 +15,9 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
 }) => {
   const playerRef = useRef<PlayerRef>(null)
 
-  const durationSec = Math.max(1, config.endTime - config.startTime)
+  const startTime = Number(config?.startTime) || 0
+  const endTime = Number(config?.endTime) || (startTime + 30)
+  const durationSec = Math.max(1, endTime - startTime)
   const durationInFrames = Math.max(30, Math.round(durationSec * 30))
 
   return (

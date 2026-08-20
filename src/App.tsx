@@ -18,6 +18,8 @@ import CSVImport from '@/pages/CSVImport'
 import Analytics from '@/pages/Analytics'
 import SettingsPage from '@/pages/SettingsPage'
 import PrivacyPolicy from '@/pages/PrivacyPolicy'
+import FeedbackPage from '@/pages/FeedbackPage'
+import AdminFeedbackPage from '@/pages/AdminFeedbackPage'
 
 export default function App() {
   if (!isSupabaseConfigured) {
@@ -60,6 +62,8 @@ export default function App() {
               <Route path="/csv-import" element={<CSVImport />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/feedback" element={<FeedbackPage />} />
+              <Route path="/admin/feedback" element={<AdminFeedbackPage />} />
               <Route path="/privacy" element={<PrivacyPolicy />} />
             </Route>
           </Route>

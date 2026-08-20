@@ -13,13 +13,15 @@ import {
   BarChart3,
   Settings,
   Shield,
+  MessageSquareHeart,
+  ShieldAlert,
   LogOut,
   Menu,
   X,
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { supabase } from '@/lib/supabase'
-import type { SocialAccount } from '@/lib/types'
+import { isFeedbackAdmin, type SocialAccount } from '@/lib/types'
 import { classNames } from '@/lib/format'
 
 const NAV_ITEMS = [
@@ -33,6 +35,7 @@ const NAV_ITEMS = [
   { to: '/patterns', label: 'Pattern Library', icon: Shapes },
   { to: '/csv-import', label: 'CSV Import', icon: FileSpreadsheet },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/feedback', label: 'Feedback', icon: MessageSquareHeart },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -93,6 +96,29 @@ export default function Layout() {
             {label}
           </NavLink>
         ))}
+
+        {isFeedbackAdmin(user?.email) && (
+          <NavLink
+            to="/admin/feedback"
+            onClick={() => setMobileOpen(false)}
+            className={({ isActive }) =>
+              classNames(
+                'flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition-colors border border-amber-500/20 mt-2',
+                isActive
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : 'bg-amber-500/5 text-amber-400/90 hover:bg-amber-500/10 hover:text-amber-300',
+              )
+            }
+          >
+            <div className="flex items-center gap-3">
+              <ShieldAlert className="h-4 w-4 shrink-0 text-amber-400" />
+              <span>Admin Feedback</span>
+            </div>
+            <span className="rounded bg-amber-500/30 px-1.5 py-0.2 text-[10px] font-bold text-amber-200">
+              ADMIN
+            </span>
+          </NavLink>
+        )}
       </nav>
 
       <div className="border-t border-surface-700 px-5 py-4 text-xs text-zinc-400">

@@ -47,22 +47,77 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   )
 }
 
-export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
-  const { width, height } = useVideoConfig()
+const isDirectVideo = (url?: string | null): boolean => {
+  if (!url) return false
+  const lower = url.toLowerCase()
+  return (
+    lower.endsWith('.mp4') ||
+    lower.endsWith('.webm') ||
+    lower.endsWith('.mov') ||
+    lower.endsWith('.m4v') ||
+    lower.includes('blob:') ||
+    lower.includes('commondatastorage.googleapis.com') ||
+    lower.includes('storage.googleapis.com') ||
+    lower.includes('/storage/v1/object/') ||
+    lower.includes('video')
+  )
+}
 
-  const cropX = config.crop.mode === 'center' ? 0.5 : config.crop.x ?? 0.5
-  const cropY = config.crop.mode === 'center' ? 0.5 : config.crop.y ?? 0.5
-  const scale = config.crop.scale ?? 1
+const isDirectImage = (url?: string | null): boolean => {
+  if (!url) return false
+  const lower = url.toLowerCase()
+  return (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp') ||
+    lower.includes('images.unsplash.com') ||
+    lower.includes('i.ytimg.com') ||
+    lower.includes('ytimg') ||
+    lower.includes('placeholder')
+  )
+}
+
+export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
+  const frame = useCurrentFrame()
+  const { width, height, durationInFrames } = useVideoConfig()
+
+  const cropConfig = config?.crop || { mode: 'smart', x: 0.5, y: 0.5, scale: 1 }
+  const cropX = cropConfig.mode === 'center' ? 0.5 : cropConfig.x ?? 0.5
+  const cropY = cropConfig.mode === 'center' ? 0.5 : cropConfig.y ?? 0.5
+  const scale = cropConfig.scale ?? 1
+
+  const startTime = Number(config?.startTime) || 0
+  const endTime = Number(config?.endTime) || (startTime + 30)
+  const startFrame = Math.max(0, Math.round(startTime * FPS))
+  const endFrame = Math.max(startFrame + 30, Math.round(endTime * FPS))
+
+  const sourceVideo = config?.sourceVideo || ''
+  const hasVideoSource = isDirectVideo(sourceVideo)
+  const hasImageSource = isDirectImage(sourceVideo)
+
+  // Gentle Ken Burns slow zoom for image backdrops
+  const imageZoom = interpolate(frame, [0, Math.max(1, durationInFrames)], [1, 1.12], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
+
+  // Pulsing ambient glow for background
+  const glowOpacity = interpolate(
+    Math.sin((frame / FPS) * Math.PI),
+    [-1, 1],
+    [0.15, 0.35],
+  )
 
   return (
-    <AbsoluteFill style={{ backgroundColor: '#0B0F19' }}>
+    <AbsoluteFill style={{ backgroundColor: '#07090E' }}>
       {/* Base Video / Backdrop */}
-      {config.sourceVideo && (config.sourceVideo.endsWith('.mp4') || config.sourceVideo.endsWith('.webm') || config.sourceVideo.includes('blob:')) ? (
+      {hasVideoSource ? (
         <AbsoluteFill>
           <Video
-            src={config.sourceVideo}
-            startFrom={Math.round(config.startTime * FPS)}
-            endAt={Math.round(config.endTime * FPS)}
+            src={sourceVideo}
+            startFrom={startFrame}
+            endAt={endFrame}
             playbackRate={config.speed || 1}
             volume={config.voiceVolume ?? 1}
             style={{
@@ -74,104 +129,119 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             }}
           />
         </AbsoluteFill>
-      ) : config.sourceVideo ? (
+      ) : hasImageSource ? (
         <AbsoluteFill>
           <Img
-            src={config.sourceVideo}
+            src={sourceVideo}
             style={{
               width: '100%',
               height: '100%',
               objectFit: 'cover',
-              transform: `scale(${scale * 1.05})`,
-              filter: 'brightness(0.85)',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${scale * imageZoom})`,
+              filter: 'brightness(0.85) saturate(1.15)',
             }}
           />
+          {/* Subtle cinematic gradient vignette */}
           <div
             style={{
               position: 'absolute',
               inset: 0,
-              background: 'linear-gradient(to bottom, rgba(0,0,0,0.3) 0%, transparent 40%, rgba(0,0,0,0.85) 100%)',
+              background: 'linear-gradient(to bottom, rgba(0,0,0,0.4) 0%, transparent 35%, rgba(0,0,0,0.4) 70%, rgba(0,0,0,0.92) 100%)',
             }}
           />
         </AbsoluteFill>
       ) : (
-        <AbsoluteFill style={{ background: 'radial-gradient(circle at center, #1e1b4b 0%, #030712 100%)' }}>
+        /* Fallback rich creator studio motion backdrop */
+        <AbsoluteFill style={{ background: 'radial-gradient(ellipse at center, #1e1b4b 0%, #0c0a1f 60%, #030712 100%)' }}>
           <div
             style={{
               position: 'absolute',
               inset: 0,
-              opacity: 0.15,
-              backgroundImage: 'radial-gradient(#6366f1 1px, transparent 1px)',
-              backgroundSize: '32px 32px',
+              opacity: glowOpacity,
+              background: 'radial-gradient(circle at 50% 40%, rgba(99, 102, 241, 0.45) 0%, transparent 60%)',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              opacity: 0.1,
+              backgroundImage: 'radial-gradient(#818cf8 1.5px, transparent 1.5px)',
+              backgroundSize: '40px 40px',
             }}
           />
         </AbsoluteFill>
       )}
 
       {/* B-Roll Segments */}
-      {config.broll?.map((b, i) => (
-        <Sequence
-          key={`broll-${i}`}
-          from={Math.round(b.startAt * FPS)}
-          durationInFrames={Math.max(1, Math.round(b.duration * FPS))}
-        >
-          <AbsoluteFill>
-            <Video
-              src={b.videoUrl}
-              muted
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-          </AbsoluteFill>
-        </Sequence>
-      ))}
+      {Array.isArray(config?.broll) &&
+        config.broll.map((b, i) => (
+          <Sequence
+            key={`broll-${i}`}
+            from={Math.max(0, Math.round((b.startAt || 0) * FPS))}
+            durationInFrames={Math.max(1, Math.round((b.duration || 3) * FPS))}
+          >
+            <AbsoluteFill>
+              <Video
+                src={b.videoUrl}
+                muted
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
+            </AbsoluteFill>
+          </Sequence>
+        ))}
 
-      {/* Captions */}
-      {config.captions?.enabled && config.captions.words?.length > 0 && (
-        <Captions
-          words={config.captions.words}
-          style={config.captions.style}
-          clipStart={config.startTime}
-        />
-      )}
+      {/* Synchronized Captions */}
+      {config?.captions?.enabled !== false &&
+        Array.isArray(config?.captions?.words) &&
+        config.captions.words.length > 0 && (
+          <Captions
+            words={config.captions.words}
+            style={config.captions.style}
+            clipStart={startTime}
+          />
+        )}
 
       {/* Overlays */}
-      {config.overlays?.map((overlay, i) => (
-        <Sequence
-          key={`overlay-${i}`}
-          from={Math.round(overlay.startAt * FPS)}
-          durationInFrames={Math.max(1, Math.round(overlay.duration * FPS))}
-        >
-          <AbsoluteFill
-            style={{
-              justifyContent:
-                overlay.position === 'top'
-                  ? 'flex-start'
-                  : overlay.position === 'center'
-                    ? 'center'
-                    : 'flex-end',
-              alignItems: 'center',
-              padding: 120,
-              pointerEvents: 'none',
-            }}
+      {Array.isArray(config?.overlays) &&
+        config.overlays.map((overlay, i) => (
+          <Sequence
+            key={`overlay-${i}`}
+            from={Math.max(0, Math.round((overlay.startAt || 0) * FPS))}
+            durationInFrames={Math.max(1, Math.round((overlay.duration || 3) * FPS))}
           >
-            <div
+            <AbsoluteFill
               style={{
-                color: overlay.color || '#fff',
-                fontSize: 56,
-                fontWeight: 800,
-                fontFamily: 'Inter, sans-serif',
-                textAlign: 'center',
-                textShadow: '0 2px 12px rgba(0,0,0,0.6)',
+                justifyContent:
+                  overlay.position === 'top'
+                    ? 'flex-start'
+                    : overlay.position === 'center'
+                      ? 'center'
+                      : 'flex-end',
+                alignItems: 'center',
+                padding: 120,
+                pointerEvents: 'none',
               }}
             >
-              {overlay.text}
-            </div>
-          </AbsoluteFill>
-        </Sequence>
-      ))}
+              <div
+                style={{
+                  color: overlay.color || '#fff',
+                  fontSize: 56,
+                  fontWeight: 800,
+                  fontFamily: 'Inter, sans-serif',
+                  textAlign: 'center',
+                  textShadow: '0 2px 12px rgba(0,0,0,0.6)',
+                }}
+              >
+                {overlay.text}
+              </div>
+            </AbsoluteFill>
+          </Sequence>
+        ))}
 
       {/* Branding Logo */}
-      {config.branding?.logoUrl && (
+      {config?.branding?.logoUrl && (
         <Img
           src={config.branding.logoUrl}
           style={{
@@ -186,7 +256,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       )}
 
       {/* Watermark */}
-      {config.branding?.watermarkText && (
+      {config?.branding?.watermarkText && (
         <div
           style={{
             position: 'absolute',
