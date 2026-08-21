@@ -586,7 +586,7 @@ export default function ClipStudio() {
       voiceId,
       rate: config?.voiceover?.rate || actor.rate,
       pitch: config?.voiceover?.pitch || actor.pitch,
-      volume: config?.voiceVolume ?? 1,
+      volume: config?.voiceover?.volume ?? config?.voiceVolume ?? 1,
       onEnd: () => setTestingVoice(false),
     })
   }
@@ -949,27 +949,52 @@ export default function ClipStudio() {
             {/* VOICE & AUDIO TAB */}
             {tab === 'voice' && (
               <div className="space-y-4">
-                {/* Voice Master Volume & Boost */}
+                {/* 1. Original Clip Video Audio */}
                 <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Volume2 className="h-4 w-4 text-brand-400" />
-                      <label className="text-xs font-semibold text-white">Clip Voice Volume</label>
+                      <div>
+                        <label className="text-xs font-semibold text-white">Original Clip Audio</label>
+                        <p className="text-[11px] text-zinc-400">Natural sound & voices from the source video</p>
+                      </div>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => update({ voiceVolume: 1.0 })}
-                        className="rounded bg-surface-750 px-2 py-0.5 text-[10px] font-medium text-zinc-300 hover:bg-surface-700"
+                        onClick={() => update({ originalVolume: 0 })}
+                        className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                          (config.originalVolume ?? 1) === 0
+                            ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                            : 'bg-surface-750 text-zinc-300 hover:bg-surface-700'
+                        }`}
+                      >
+                        Mute
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => update({ originalVolume: 1.0 })}
+                        className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                          (config.originalVolume ?? 1) === 1.0
+                            ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30'
+                            : 'bg-surface-750 text-zinc-300 hover:bg-surface-700'
+                        }`}
                       >
                         100%
                       </button>
                       <button
                         type="button"
-                        onClick={() => update({ voiceVolume: 1.5 })}
+                        onClick={() => update({ originalVolume: 1.5 })}
                         className="rounded bg-brand-500/20 px-2 py-0.5 text-[10px] font-medium text-brand-300 hover:bg-brand-500/30"
                       >
                         +50% Boost
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => update({ originalVolume: 2.0 })}
+                        className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-500/30"
+                      >
+                        200% Max
                       </button>
                     </div>
                   </div>
@@ -977,19 +1002,21 @@ export default function ClipStudio() {
                     <input
                       type="range"
                       min={0}
-                      max={1.5}
+                      max={2.0}
                       step={0.05}
-                      value={config.voiceVolume ?? 1}
-                      onChange={(e) => update({ voiceVolume: Number(e.target.value) })}
+                      value={config.originalVolume ?? 1}
+                      onChange={(e) => update({ originalVolume: Number(e.target.value) })}
                       className="w-full accent-brand-500"
                     />
-                    <span className="font-mono text-xs text-brand-400 w-12 text-right">
-                      {Math.round((config.voiceVolume ?? 1) * 100)}%
+                    <span className="font-mono text-xs text-brand-400 w-14 text-right font-medium">
+                      {(config.originalVolume ?? 1) === 0
+                        ? 'MUTED'
+                        : `${Math.round((config.originalVolume ?? 1) * 100)}%`}
                     </span>
                   </div>
                 </div>
 
-                {/* AI Voice Narration Persona Selector */}
+                {/* 2. AI Voice Narration Persona Selector */}
                 <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
@@ -998,7 +1025,7 @@ export default function ClipStudio() {
                         AI Voice Narration
                       </h4>
                       <p className="text-[11px] text-zinc-400">
-                        Synchronized speaker voice speaking your clip captions
+                        Synchronized AI speaker voice reading your clip captions alongside original audio
                       </p>
                     </div>
                     <input
@@ -1018,12 +1045,66 @@ export default function ClipStudio() {
                           },
                         })
                       }
-                      className="h-4 w-4 rounded accent-brand-500 cursor-pointer"
+                      className="h-4 w-4 rounded accent-emerald-500 cursor-pointer"
                     />
                   </div>
 
                   {config.voiceover?.enabled !== false && (
                     <div className="space-y-3 pt-2">
+                      {/* Voiceover Volume Slider */}
+                      <div className="space-y-1.5 rounded-lg bg-surface-800/80 p-2.5">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] font-medium text-zinc-300">Voiceover Volume</label>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                update({
+                                  voiceover: {
+                                    ...(config.voiceover || {
+                                      voiceId: 'alex-viral',
+                                      rate: 1.1,
+                                      pitch: 1.05,
+                                      duckMusic: true,
+                                      enabled: true,
+                                    }),
+                                    volume: 1.0,
+                                  },
+                                })
+                              }
+                              className="rounded bg-surface-700 px-1.5 py-0.5 text-[9px] text-zinc-300 hover:bg-surface-600"
+                            >
+                              100%
+                            </button>
+                            <span className="font-mono text-xs text-emerald-400 w-12 text-right">
+                              {Math.round((config.voiceover?.volume ?? config.voiceVolume ?? 1) * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1.5}
+                          step={0.05}
+                          value={config.voiceover?.volume ?? config.voiceVolume ?? 1}
+                          onChange={(e) =>
+                            update({
+                              voiceVolume: Number(e.target.value),
+                              voiceover: {
+                                ...(config.voiceover || {
+                                  voiceId: 'alex-viral',
+                                  rate: 1.1,
+                                  pitch: 1.05,
+                                  duckMusic: true,
+                                  enabled: true,
+                                }),
+                                volume: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="w-full accent-emerald-500"
+                        />
+                      </div>
                       <label className="text-[11px] font-medium text-zinc-300">Choose Voice Actor Persona</label>
                       <div className="grid grid-cols-1 gap-2">
                         {VOICE_ACTORS.map((actor) => {

@@ -56,16 +56,34 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
 const isDirectVideo = (url?: string | null): boolean => {
   if (!url) return false
   const lower = url.toLowerCase()
+  if (
+    (lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.png') ||
+      lower.endsWith('.webp') ||
+      lower.includes('images.unsplash.com') ||
+      lower.includes('i.ytimg.com') ||
+      lower.includes('ytimg.com')) &&
+    !lower.includes('.mp4') &&
+    !lower.includes('video') &&
+    !lower.includes('blob:')
+  ) {
+    return false
+  }
   return (
-    lower.endsWith('.mp4') ||
-    lower.endsWith('.webm') ||
-    lower.endsWith('.mov') ||
-    lower.endsWith('.m4v') ||
+    lower.includes('.mp4') ||
+    lower.includes('.webm') ||
+    lower.includes('.mov') ||
+    lower.includes('.m4v') ||
+    lower.includes('.m3u8') ||
+    lower.includes('.ogv') ||
     lower.includes('blob:') ||
     lower.includes('commondatastorage.googleapis.com') ||
     lower.includes('storage.googleapis.com') ||
     lower.includes('/storage/v1/object/') ||
-    lower.includes('video')
+    lower.includes('video') ||
+    lower.includes('supabase.co/storage') ||
+    lower.startsWith('http')
   )
 }
 
@@ -125,7 +143,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             startFrom={startFrame}
             endAt={endFrame}
             playbackRate={config.speed || 1}
-            volume={config.voiceVolume ?? 1}
+            volume={config.originalVolume ?? 1}
             style={{
               width: '100%',
               height: '100%',
@@ -283,7 +301,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       {config?.voiceUrl && (
         <Audio
           src={config.voiceUrl}
-          volume={config.voiceVolume ?? 1}
+          volume={config.voiceover?.volume ?? config.voiceVolume ?? 1}
         />
       )}
 
