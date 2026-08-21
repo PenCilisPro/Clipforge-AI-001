@@ -330,6 +330,7 @@ export interface ClipConfiguration {
     watermarkText: string | null
   }
   originalVolume?: number
+  originalAudioUrl?: string | null
   voiceVolume: number
   voiceUrl?: string | null
   voiceover?: VoiceoverConfig | null
@@ -370,6 +371,7 @@ export function defaultClipConfiguration(
     overlays: [],
     branding: { logoUrl: null, watermarkText: null },
     originalVolume: 1.0,
+    originalAudioUrl: null,
     voiceVolume: 1,
     voiceUrl: null,
     voiceover: {
@@ -542,6 +544,7 @@ export function normalizeClipConfiguration(
       watermarkText: rawConfig?.branding?.watermarkText || null,
     },
     originalVolume: typeof rawConfig?.originalVolume === 'number' ? rawConfig.originalVolume : 1.0,
+    originalAudioUrl: rawConfig?.originalAudioUrl || null,
     voiceVolume: typeof rawConfig?.voiceVolume === 'number' ? rawConfig.voiceVolume : 1,
     voiceUrl: rawConfig?.voiceUrl || null,
     voiceover,

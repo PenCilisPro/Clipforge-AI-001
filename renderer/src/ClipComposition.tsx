@@ -40,6 +40,37 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   )
 }
 
+const isDirectVideo = (url?: string | null): boolean => {
+  if (!url) return false
+  const lower = url.toLowerCase()
+  if (
+    (lower.endsWith('.jpg') ||
+      lower.endsWith('.jpeg') ||
+      lower.endsWith('.png') ||
+      lower.endsWith('.webp') ||
+      lower.includes('images.unsplash.com') ||
+      lower.includes('i.ytimg.com') ||
+      lower.includes('ytimg.com')) &&
+    !lower.includes('.mp4') &&
+    !lower.includes('video') &&
+    !lower.includes('blob:')
+  ) {
+    return false
+  }
+  return (
+    lower.includes('.mp4') ||
+    lower.includes('.webm') ||
+    lower.includes('.mov') ||
+    lower.includes('.m4v') ||
+    lower.includes('.m3u8') ||
+    lower.includes('blob:') ||
+    lower.includes('googlevideo.com') ||
+    lower.includes('storage.googleapis.com') ||
+    lower.includes('supabase.co/storage') ||
+    lower.startsWith('http')
+  )
+}
+
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   const { width, height } = useVideoConfig()
 
@@ -49,22 +80,60 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const cropX = config.crop.mode === 'center' ? 0.5 : config.crop.x
   const cropY = config.crop.mode === 'center' ? 0.5 : config.crop.y
 
+  const startFrame = Math.round(config.startTime * FPS)
+  const endFrame = Math.round(config.endTime * FPS)
+
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
-      <AbsoluteFill>
-        <OffthreadVideo
-          src={config.sourceVideo}
-          startFrom={Math.round(config.startTime * FPS)}
-          endAt={Math.round(config.endTime * FPS)}
-          playbackRate={config.speed}          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-            transform: `scale(${config.crop.scale})`,
-          }}
+      {/* Primary Video / Backdrop */}
+      {isDirectVideo(config.sourceVideo) ? (
+        <AbsoluteFill>
+          <OffthreadVideo
+            src={config.sourceVideo}
+            startFrom={startFrame}
+            endAt={endFrame}
+            playbackRate={config.speed || 1}
+            volume={config.originalVolume ?? 1}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${config.crop.scale})`,
+            }}
+          />
+        </AbsoluteFill>
+      ) : (
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Img
+            src={config.sourceVideo}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              filter: 'brightness(0.95)',
+              transform: `scale(${config.crop?.scale || 1})`,
+            }}
+          />
+        </AbsoluteFill>
+      )}
+
+      {/* Standalone original audio stream if provided (e.g. YouTube separate audio track) */}
+      {config.originalAudioUrl && (
+        <Audio
+          src={config.originalAudioUrl}
+          startFrom={startFrame}
+          volume={config.originalVolume ?? 1}
         />
-      </AbsoluteFill>
+      )}
+
+      {/* Synchronized AI voiceover audio narration */}
+      {config.voiceUrl && (
+        <Audio
+          src={config.voiceUrl}
+          volume={config.voiceover?.volume ?? config.voiceVolume ?? 1}
+        />
+      )}
 
       {config.broll.map((b, i) => (
         <Sequence

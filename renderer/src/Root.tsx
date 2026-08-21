@@ -47,7 +47,7 @@ export const Root: React.FC = () => {
       width={1080}
       height={1920}
       defaultProps={{ config: defaultConfig }}
-      calculateMetadata={({ props }) => {
+      calculateMetadata={({ props }: { props: { config: typeof defaultConfig } }) => {
         const { config } = props
         const durationSeconds = Math.max(
           1,

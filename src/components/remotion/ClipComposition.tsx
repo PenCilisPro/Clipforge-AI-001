@@ -297,6 +297,15 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
         </div>
       )}
 
+      {/* Standalone original audio stream from YouTube/source if provided */}
+      {config?.originalAudioUrl && (
+        <Audio
+          src={config.originalAudioUrl}
+          startFrom={startFrame}
+          volume={config.originalVolume ?? 1}
+        />
+      )}
+
       {/* Voice Narration Audio Track */}
       {config?.voiceUrl && (
         <Audio

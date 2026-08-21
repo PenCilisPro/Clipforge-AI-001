@@ -76,7 +76,19 @@ export interface ClipConfiguration {
     logoUrl: string | null
     watermarkText: string | null
   }
+  originalVolume?: number
+  originalAudioUrl?: string | null
   voiceVolume: number
+  voiceUrl?: string | null
+  voiceover?: {
+    enabled: boolean
+    voiceId: string
+    actorName: string
+    rate: number
+    pitch: number
+    volume: number
+    duckMusic: boolean
+  } | null
 }
 
 export const FPS = 30

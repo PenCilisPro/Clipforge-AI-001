@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import type { Project, Pattern } from './types'
+import { resolveYoutubeStream } from './youtubeResolver'
 
 const getFallbackKey = () => {
   try {
@@ -56,12 +57,27 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
     let thumbnailUrl = `https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1280&q=80`
     let durationSeconds = 300
     let youtubeVideoId: string | null = null
+    let directStreamVideoUrl: string | null = null
+    let directStreamAudioUrl: string | null = null
 
-    // 2. Fetch YouTube metadata
+    // 2. Fetch YouTube metadata & direct stream URLs
     if (project.source_type === 'youtube' && project.source_url) {
       youtubeVideoId = extractYoutubeId(project.source_url)
       if (youtubeVideoId) {
         thumbnailUrl = `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg`
+        try {
+          const ytStream = await resolveYoutubeStream(project.source_url)
+          if (ytStream) {
+            title = ytStream.title || title
+            thumbnailUrl = ytStream.thumbnailUrl || thumbnailUrl
+            durationSeconds = ytStream.durationSeconds || durationSeconds
+            directStreamVideoUrl = ytStream.videoUrl || null
+            directStreamAudioUrl = ytStream.audioUrl || null
+          }
+        } catch {
+          // ignore
+        }
+
         try {
           const ytRes = await fetch(
             `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id=${youtubeVideoId}&key=${YOUTUBE_API_KEY}`,
@@ -103,12 +119,15 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
       .eq('project_id', projectId)
       .maybeSingle()
 
+    const videoStoragePath = directStreamVideoUrl || directStreamAudioUrl || null
+
     if (!existingVideo) {
       await supabase.from('videos').insert({
         project_id: projectId,
         title,
         thumbnail_url: thumbnailUrl,
         youtube_video_id: youtubeVideoId,
+        storage_path: videoStoragePath,
         duration: durationSeconds,
       })
     } else {
@@ -118,6 +137,7 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
           title,
           thumbnail_url: thumbnailUrl,
           youtube_video_id: youtubeVideoId,
+          storage_path: videoStoragePath,
           duration: durationSeconds,
         })
         .eq('id', existingVideo.id)
@@ -332,6 +352,7 @@ Return ONLY valid JSON matching this exact structure:
           matched_pattern_name: c.matchedPatternName || null,
           status: 'DETECTED',
           current_thumbnail_url: thumbnailUrl,
+          current_render_url: directStreamVideoUrl || null,
         })
         .select()
         .single()
@@ -341,6 +362,11 @@ Return ONLY valid JSON matching this exact structure:
           clip_id: insertedClip.id,
           version_number: 1,
           configuration_json: {
+            sourceVideo: directStreamVideoUrl || null,
+            originalAudioUrl: directStreamAudioUrl || null,
+            originalVolume: 1.0,
+            startTime: c.startTime || 0,
+            endTime: c.endTime || 30,
             layout: '9:16',
             captions: { preset: project.caption_preset || 'bold' },
             broll: project.auto_broll,

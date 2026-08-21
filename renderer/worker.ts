@@ -151,7 +151,7 @@ async function processJob(job: RenderJobRow): Promise<void> {
       codec: 'h264',
       outputLocation: outputPath,
       inputProps: { config },
-      onProgress: ({ progress }) => {
+      onProgress: ({ progress }: { progress: number }) => {
         const pct = Math.round(progress * 85) + 5
         if (pct - lastReported >= 5) {
           lastReported = pct

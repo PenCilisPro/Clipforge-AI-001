@@ -36,6 +36,7 @@ import type {
   RenderJob,
 } from '@/lib/types'
 import { normalizeClipConfiguration } from '@/lib/types'
+import { resolveYoutubeStream } from '@/lib/youtubeResolver'
 import { saveConfigurationAsVersion, createRenderJob } from '@/lib/render'
 import { classNames, formatDuration, formatTimestamp } from '@/lib/format'
 import { LoadingState, ProgressBar } from '@/components/ui'
@@ -267,6 +268,30 @@ export default function ClipStudio() {
           },
         )
       })
+
+      // If source is a YouTube video, resolve direct media stream with real audio track
+      const sourceUrl = (projectRes.data as any)?.source_url || (videoRes.data as any)?.storage_path
+      const sourceType = (projectRes.data as any)?.source_type
+      if (sourceUrl && (sourceType === 'youtube' || sourceUrl.includes('youtu'))) {
+        resolveYoutubeStream(sourceUrl)
+          .then((ytStream) => {
+            if (ytStream) {
+              setConfig((prev) => {
+                if (!prev) return prev
+                const needsVideo =
+                  !prev.sourceVideo ||
+                  prev.sourceVideo.includes('i.ytimg.com') ||
+                  prev.sourceVideo.includes('ForBiggerEscapes')
+                return {
+                  ...prev,
+                  sourceVideo: needsVideo && ytStream.videoUrl ? ytStream.videoUrl : prev.sourceVideo,
+                  originalAudioUrl: prev.originalAudioUrl || ytStream.audioUrl || null,
+                }
+              })
+            }
+          })
+          .catch(() => {})
+      }
     } catch (err) {
       console.error('Error loading clip in ClipStudio:', err)
     } finally {
