@@ -56,9 +56,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
           src={config.sourceVideo}
           startFrom={Math.round(config.startTime * FPS)}
           endAt={Math.round(config.endTime * FPS)}
-          playbackRate={config.speed}
-          volume={config.voiceVolume}
-          style={{
+          playbackRate={config.speed}          style={{
             width: '100%',
             height: '100%',
             objectFit: 'cover',
