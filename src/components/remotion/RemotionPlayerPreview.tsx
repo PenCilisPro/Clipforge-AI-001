@@ -86,8 +86,8 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
     if (!player) return
 
     const onPlay = () => {
-      // If voiceover is enabled and no explicit voiceUrl mp3 is set in config, synthesize voice live alongside video audio
-      if (config.voiceover?.enabled !== false && !config.voiceUrl && scriptText && !isVoiceMuted) {
+      // Synthesize voice ONLY if explicitly enabled by the creator and not muted
+      if (config.voiceover?.enabled === true && !config.voiceUrl && scriptText && !isVoiceMuted && voiceVolume > 0) {
         setIsSpeaking(true)
         LiveVoiceSynthesizer.speak(scriptText, {
           voiceId: config.voiceover?.voiceId || 'alex-viral',

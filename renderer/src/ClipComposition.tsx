@@ -93,7 +93,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             startFrom={startFrame}
             endAt={endFrame}
             playbackRate={config.speed || 1}
-            volume={config.originalVolume ?? 1}
+            volume={config?.originalAudioUrl ? 0 : (config.originalVolume ?? 1)}
             style={{
               width: '100%',
               height: '100%',

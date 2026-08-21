@@ -55,6 +55,10 @@ import {
   LiveVoiceSynthesizer,
   generateSpeechAudioBlob,
 } from '@/lib/voiceSynthesis'
+import {
+  searchJamendoApi,
+  CURATED_JAMENDO_TRACKS,
+} from '@/lib/jamendo'
 
 type Tab = 'video' | 'captions' | 'voice' | 'broll' | 'music'
 type CaptionsSubTab = 'presets' | 'words' | 'whisper'
@@ -198,7 +202,16 @@ export default function ClipStudio() {
 
   // Music state
   const [musicQuery, setMusicQuery] = useState('')
-  const [musicResults, setMusicResults] = useState<MusicSearchResult[]>([])
+  const [selectedMusicCategory, setSelectedMusicCategory] = useState<string>('all')
+  const [musicResults, setMusicResults] = useState<MusicSearchResult[]>(() =>
+    CURATED_JAMENDO_TRACKS.map((t) => ({
+      externalId: t.id,
+      title: t.title,
+      artist: t.artist_name,
+      audioUrl: t.audio,
+      duration: t.duration,
+    }))
+  )
   const [musicSearching, setMusicSearching] = useState(false)
   const [musicError, setMusicError] = useState<string | null>(null)
 
@@ -547,38 +560,96 @@ export default function ClipStudio() {
     showNotification(`Added "${asset.title}" B-Roll overlay!`)
   }
 
-  // Search stock B-Roll via Edge Function
+  // Search stock B-Roll (client catalog + API fallback)
   async function searchBroll() {
     if (!brollQuery.trim()) return
     setBrollSearching(true)
     setBrollError(null)
     try {
-      const data = await invokeFunction<{ results: BrollSearchResult[] }>('broll-search', {
-        query: brollQuery,
-      })
-      setBrollResults(data.results ?? [])
-      if (!data.results || data.results.length === 0) {
-        setBrollError('No stock videos found. Try "tech", "coding", "finance", or use the Curated Catalog below.')
+      const q = brollQuery.toLowerCase().trim()
+      const localMatches = STOCK_BROLL_CATALOG.filter(
+        (s) => s.title.toLowerCase().includes(q) || (s.keywords && s.keywords.some((k: string) => k.toLowerCase().includes(q)))
+      ).map((s) => ({
+        provider: 'stock',
+        externalId: s.id,
+        videoUrl: s.videoUrl,
+        previewImageUrl: s.thumbnailUrl,
+      }))
+
+      if (localMatches.length > 0) {
+        setBrollResults(localMatches)
+      } else {
+        try {
+          const data = await invokeFunction<{ results: BrollSearchResult[] }>('broll-search', {
+            query: brollQuery,
+          })
+          setBrollResults(data.results ?? [])
+        } catch {
+          // If remote edge function is not deployed, fall back to general stock items
+          setBrollResults(
+            STOCK_BROLL_CATALOG.slice(0, 6).map((s) => ({
+              provider: 'stock',
+              externalId: s.id,
+              videoUrl: s.videoUrl,
+              previewImageUrl: s.thumbnailUrl,
+            }))
+          )
+        }
       }
     } catch (err) {
-      setBrollError('Stock API search error. You can choose any clip from the Curated Stock Library below.')
+      setBrollError('Showing curated stock clips from the library below.')
     } finally {
       setBrollSearching(false)
     }
   }
 
-  // Search Jamendo music
-  async function searchMusic() {
-    if (!musicQuery.trim()) return
+  // Search Jamendo music directly via public Jamendo API + curated library
+  async function searchMusic(category?: string) {
+    const activeCat = category || selectedMusicCategory
+    const query = musicQuery.trim()
     setMusicSearching(true)
     setMusicError(null)
     try {
-      const data = await invokeFunction<{ results: MusicSearchResult[] }>('music-search', {
-        query: musicQuery,
+      const tags = activeCat !== 'all' ? activeCat : ''
+      const results = await searchJamendoApi({
+        query,
+        tags,
+        limit: 16,
       })
-      setMusicResults(data.results ?? [])
+
+      if (results && results.length > 0) {
+        setMusicResults(
+          results.map((r) => ({
+            externalId: r.id,
+            title: r.title,
+            artist: r.artist_name,
+            audioUrl: r.audio,
+            duration: r.duration,
+          }))
+        )
+      } else {
+        // Fallback to curated catalog
+        setMusicResults(
+          CURATED_JAMENDO_TRACKS.map((t) => ({
+            externalId: t.id,
+            title: t.title,
+            artist: t.artist_name,
+            audioUrl: t.audio,
+            duration: t.duration,
+          }))
+        )
+      }
     } catch (err) {
-      setMusicError(err instanceof Error ? err.message : 'Search failed')
+      console.warn('Jamendo search error, using curated catalog:', err)
+      setMusicResults(
+        CURATED_JAMENDO_TRACKS.map((t) => ({
+          externalId: t.id,
+          title: t.title,
+          artist: t.artist_name,
+          audioUrl: t.audio,
+          duration: t.duration,
+        }))
+      )
     } finally {
       setMusicSearching(false)
     }
@@ -1975,8 +2046,8 @@ export default function ClipStudio() {
               <div className="space-y-4">
                 <div className="flex gap-2">
                   <input
-                    className="input"
-                    placeholder="Search royalty-free music…"
+                    className="input text-xs"
+                    placeholder="Search Jamendo royalty-free music (e.g. phonk, cyberpunk, lofi, cinematic)..."
                     value={musicQuery}
                     onChange={(e) => setMusicQuery(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && void searchMusic()}
@@ -1985,6 +2056,7 @@ export default function ClipStudio() {
                     onClick={() => void searchMusic()}
                     disabled={musicSearching}
                     className="btn-secondary !px-3"
+                    title="Search Jamendo Library"
                   >
                     {musicSearching ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -1993,55 +2065,122 @@ export default function ClipStudio() {
                     )}
                   </button>
                 </div>
-                {musicError && <div className="text-xs text-red-400">{musicError}</div>}
+
+                {/* Genre & Vibe Filter Pills */}
+                <div className="flex flex-wrap gap-1.5 pb-1">
+                  {[
+                    { id: 'all', label: 'All' },
+                    { id: 'tech', label: 'Cyberpunk & Tech' },
+                    { id: 'phonk', label: 'Phonk & Viral' },
+                    { id: 'cinematic', label: 'Cinematic Epic' },
+                    { id: 'lofi', label: 'Lofi Chill' },
+                    { id: 'corporate', label: 'Corporate' },
+                  ].map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedMusicCategory(cat.id)
+                        void searchMusic(cat.id)
+                      }}
+                      className={`text-[11px] px-2.5 py-1 rounded-full border transition-all ${
+                        selectedMusicCategory === cat.id
+                          ? 'bg-brand-500/20 text-brand-300 border-brand-500/50 font-medium'
+                          : 'bg-surface-800/80 text-zinc-400 border-surface-700 hover:text-zinc-200 hover:border-surface-600'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+
+                {musicError && <div className="text-xs text-amber-400 bg-amber-500/10 p-2 rounded border border-amber-500/30">{musicError}</div>}
+
+                {/* Jamendo Track List */}
                 {musicResults.length > 0 && (
-                  <ul className="space-y-2 max-h-48 overflow-y-auto">
-                    {musicResults.map((m) => (
-                      <li
-                        key={m.externalId}
-                        className="flex items-center gap-2 rounded-lg border border-surface-700 p-2"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-medium">{m.title}</p>
-                          <p className="truncate text-[11px] text-zinc-500">{m.artist}</p>
-                        </div>
-                        <audio src={m.audioUrl} controls className="h-7 w-24" />
-                        <button
-                          onClick={() =>
-                            update({
-                              music: {
-                                audioUrl: m.audioUrl,
-                                volume: 0.12,
-                                fadeIn: 1,
-                                fadeOut: 1,
-                                trimStart: 0,
-                                title: m.title,
-                              },
-                            })
-                          }
-                          className="btn-secondary !py-1 text-xs"
-                        >
-                          Use
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5">
+                      <Music className="h-3.5 w-3.5 text-brand-400" />
+                      Royalty-Free Tracks ({musicResults.length})
+                    </p>
+                    <ul className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      {musicResults.map((m) => {
+                        const isCurrent = config.music?.audioUrl === m.audioUrl
+                        return (
+                          <li
+                            key={m.externalId}
+                            className={`flex items-center gap-2.5 rounded-lg border p-2.5 transition-colors ${
+                              isCurrent
+                                ? 'border-brand-500/60 bg-brand-500/10'
+                                : 'border-surface-700/80 bg-surface-850 hover:border-surface-600'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-xs font-semibold text-white">{m.title}</p>
+                              <p className="truncate text-[11px] text-zinc-400">{m.artist}</p>
+                            </div>
+                            <audio
+                              src={m.audioUrl}
+                              controls
+                              className="h-7 w-28 opacity-80 hover:opacity-100"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                update({
+                                  music: {
+                                    audioUrl: m.audioUrl,
+                                    volume: config.music?.volume ?? 0.12,
+                                    fadeIn: 1,
+                                    fadeOut: 1,
+                                    trimStart: 0,
+                                    title: m.title,
+                                  },
+                                })
+                                showNotification(`Set background music: "${m.title}"`)
+                              }}
+                              className={`!py-1 !px-2.5 text-xs font-medium rounded ${
+                                isCurrent
+                                  ? 'bg-brand-500 text-white shadow-sm'
+                                  : 'btn-secondary'
+                              }`}
+                            >
+                              {isCurrent ? 'Active' : 'Use'}
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
                 )}
+
                 {config.music ? (
-                  <div className="space-y-3 rounded-lg border border-surface-700 p-3 bg-surface-850">
+                  <div className="space-y-3 rounded-lg border border-brand-500/40 p-3 bg-brand-950/20">
                     <div className="flex items-center justify-between">
-                      <p className="text-sm font-medium">♪ {config.music.title ?? 'Track'}</p>
+                      <div className="flex items-center gap-2">
+                        <Music className="h-4 w-4 text-brand-400" />
+                        <p className="text-xs font-medium text-brand-200">
+                          Active: {config.music.title ?? 'Custom Track'}
+                        </p>
+                      </div>
                       <button
-                        onClick={() => update({ music: null })}
-                        className="btn-ghost !px-1.5 text-red-400"
+                        onClick={() => {
+                          update({ music: null })
+                          showNotification('Removed background music')
+                        }}
+                        className="btn-ghost !px-1.5 text-red-400 hover:text-red-300"
+                        title="Remove Music"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
                     <div>
-                      <label className="label">
-                        Music Volume ({Math.round(config.music.volume * 100)}%)
-                      </label>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="text-[11px] text-zinc-400">
+                          Music Volume ({Math.round(config.music.volume * 100)}%)
+                        </label>
+                        <span className="text-[10px] text-zinc-500">Auto-ducked during speech</span>
+                      </div>
                       <input
                         type="range"
                         min={0}
@@ -2056,8 +2195,8 @@ export default function ClipStudio() {
                     </div>
                   </div>
                 ) : (
-                  <p className="text-xs text-zinc-500">
-                    No background music track selected.
+                  <p className="text-xs text-zinc-500 text-center py-2">
+                    Select any Jamendo track above to add background music to your short clip.
                   </p>
                 )}
               </div>

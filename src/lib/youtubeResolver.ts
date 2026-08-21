@@ -49,14 +49,49 @@ export async function resolveYoutubeStream(urlOrId: string): Promise<YoutubeStre
     const videoItems = Array.isArray(data.videos?.items) ? data.videos.items : []
     const audioItems = Array.isArray(data.audios?.items) ? data.audios.items : []
 
-    // 1. Find best video with audio enabled (e.g. 720p or 360p mp4 containing integrated audio stream)
+    // 1. Prioritize clean English/original audio stream
+    const audioTrackList = audioItems.map((a: any) => {
+      const url: string = a.url || ''
+      const matchLang = url.match(/lang%3D([a-zA-Z-]+)/i) || url.match(/lang=([a-zA-Z-]+)/i)
+      const lang = matchLang ? matchLang[1].toLowerCase() : ''
+      const isOriginal = url.includes('acont%3Doriginal') || url.includes('acont=original')
+      const isDubbed = url.includes('acont%3Ddubbed') || url.includes('acont=dubbed')
+      const isM4a = a.mimeType?.includes('mp4') || a.extension === 'm4a'
+      const isEn = lang.startsWith('en') || (!lang && !isDubbed)
+      return {
+        ...a,
+        lang,
+        isOriginal,
+        isDubbed,
+        isM4a,
+        isEn,
+      }
+    })
+
+    // Best audio selection hierarchy:
+    // 1. English + Original + MP4/M4A
+    // 2. English + Original
+    // 3. English (any) + NOT dubbed
+    // 4. Any Original (non-dubbed)
+    // 5. English dubbed (if original wasn't english)
+    // 6. MP4/M4A non-dubbed
+    const bestAudioTrack =
+      audioTrackList.find((a: any) => a.isEn && a.isOriginal && a.isM4a) ||
+      audioTrackList.find((a: any) => a.isEn && a.isOriginal) ||
+      audioTrackList.find((a: any) => a.isEn && !a.isDubbed) ||
+      audioTrackList.find((a: any) => a.isOriginal) ||
+      audioTrackList.find((a: any) => a.isEn) ||
+      audioTrackList.find((a: any) => !a.isDubbed && a.isM4a) ||
+      audioTrackList.find((a: any) => !a.isDubbed) ||
+      audioTrackList[0]
+
+    // 2. Find best video with audio (prefer 720p/1080p MP4)
     const directVideoWithAudio =
       videoItems.find((v: any) => v.url && v.hasAudio === true && (v.quality === '720p' || v.quality === '1080p')) ||
       videoItems.find((v: any) => v.url && v.hasAudio === true) ||
       videoItems[0]
 
-    // 2. Find best separate audio stream
-    const directAudio = audioItems[0]?.url || directVideoWithAudio?.url
+    const directAudio = bestAudioTrack?.url || directVideoWithAudio?.url
 
     const info: YoutubeStreamInfo = {
       videoId,

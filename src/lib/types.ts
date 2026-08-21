@@ -375,7 +375,7 @@ export function defaultClipConfiguration(
     voiceVolume: 1,
     voiceUrl: null,
     voiceover: {
-      enabled: true,
+      enabled: false,
       voiceId: 'alex-viral',
       actorName: 'Alex (Viral TikTok Narrator)',
       rate: 1.1,
@@ -511,10 +511,10 @@ export function normalizeClipConfiguration(
     subject: rawConfig?.crop?.subject || 'face',
   }
 
-  // Safe Voiceover
+  // Safe Voiceover (opt-in only so speech synthesis does not mix over original clip audio)
   const rawVoice = rawConfig?.voiceover
   const voiceover: VoiceoverConfig = {
-    enabled: rawVoice?.enabled !== false,
+    enabled: Boolean(rawVoice?.enabled === true),
     voiceId: rawVoice?.voiceId || 'alex-viral',
     actorName: rawVoice?.actorName || 'Alex (Viral TikTok Narrator)',
     rate: typeof rawVoice?.rate === 'number' ? rawVoice.rate : 1.1,
