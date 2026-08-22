@@ -106,6 +106,19 @@ const isDirectVideo = (url?: string | null): boolean => {
   )
 }
 
+const getResolvedThumbnail = (config: ClipConfiguration): string => {
+  if (config.thumbnailUrl) return config.thumbnailUrl
+  if (config.youtubeVideoId) {
+    return `https://i.ytimg.com/vi/${config.youtubeVideoId}/hqdefault.jpg`
+  }
+  const raw = config.sourceVideo || ''
+  const ytMatch = raw.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/)
+  if (ytMatch) {
+    return `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`
+  }
+  return 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1280&q=80'
+}
+
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   const frame = useCurrentFrame()
   const { width, height, durationInFrames } = useVideoConfig()
@@ -120,52 +133,146 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
   const rawSource = (config?.sourceVideo || '').trim()
   const hasDirectVideo = isDirectVideo(rawSource)
+  const resolvedThumbnail = getResolvedThumbnail(config)
 
-  // Primary video URL: use the direct video source if provided, or high-speed resilient vertical/landscape HD stream
-  const sourceVideo = hasDirectVideo
-    ? rawSource
-    : 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
+  // Cinematic Ken-Burns subtle motion for backdrops
+  const kenBurnsScale = interpolate(frame, [0, Math.max(30, durationInFrames)], [1.02, 1.15], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
+  const kenBurnsPanY = interpolate(frame, [0, Math.max(30, durationInFrames)], [0, -35], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
 
-  // Pulsing ambient background glow
+  // Pulsing ambient glow
   const glowOpacity = interpolate(
     Math.sin((frame / FPS) * Math.PI),
     [-1, 1],
-    [0.2, 0.45],
+    [0.35, 0.65],
   )
 
   return (
-    <AbsoluteFill style={{ backgroundColor: '#07090E' }}>
-      {/* 1. Underlying animated ambient glow so canvas is never dead black */}
-      <AbsoluteFill style={{ background: 'radial-gradient(ellipse at center, #1e1b4b 0%, #0c0a1f 60%, #030712 100%)' }}>
+    <AbsoluteFill style={{ backgroundColor: '#090B10' }}>
+      {/* 1. Underlying Cinematic Footage / Motion Visual Engine (Never empty black or purple) */}
+      <AbsoluteFill style={{ overflow: 'hidden' }}>
+        {/* Full-bleed blurred ambient backdrop */}
+        <Img
+          src={resolvedThumbnail}
+          style={{
+            position: 'absolute',
+            width: '120%',
+            height: '120%',
+            left: '-10%',
+            top: '-10%',
+            objectFit: 'cover',
+            filter: 'blur(45px) brightness(0.45) saturate(1.4)',
+            transform: `scale(${kenBurnsScale})`,
+          }}
+        />
+
+        {/* Primary foreground imagery with dynamic Ken Burns motion */}
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden',
+          }}
+        >
+          <Img
+            src={resolvedThumbnail}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${scale * kenBurnsScale}) translateY(${kenBurnsPanY}px)`,
+              filter: 'contrast(1.05) saturate(1.1)',
+            }}
+          />
+        </div>
+
+        {/* Cinematic vignette & vertical contrast overlays */}
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background:
+              'linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0.2) 65%, rgba(0,0,0,0.85) 100%)',
+          }}
+        />
+
+        {/* Studio accent light sweep */}
         <div
           style={{
             position: 'absolute',
             inset: 0,
             opacity: glowOpacity,
-            background: 'radial-gradient(circle at 50% 40%, rgba(99, 102, 241, 0.4) 0%, transparent 65%)',
+            background: 'radial-gradient(ellipse at 50% 30%, rgba(249, 115, 22, 0.25) 0%, transparent 60%)',
+            pointerEvents: 'none',
           }}
         />
+
+        {/* Dynamic Voice/Audio Equalizer Waveform Bars at bottom */}
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 300,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'flex-end',
+            gap: 6,
+            opacity: 0.75,
+            pointerEvents: 'none',
+          }}
+        >
+          {Array.from({ length: 18 }).map((_, idx) => {
+            const barHeight = interpolate(
+              Math.sin((frame * 0.25) + idx * 0.6),
+              [-1, 1],
+              [8, 48 + (idx % 4) * 12],
+            )
+            return (
+              <div
+                key={idx}
+                style={{
+                  width: 5,
+                  height: barHeight,
+                  borderRadius: 3,
+                  backgroundColor: idx % 2 === 0 ? '#f97316' : '#ffffff',
+                  opacity: 0.85,
+                }}
+              />
+            )
+          })}
+        </div>
       </AbsoluteFill>
 
-      {/* 2. Video Player Layer (Always dynamic real video playback) */}
-      <AbsoluteFill style={{ overflow: 'hidden' }}>
-        <Video
-          src={sourceVideo}
-          startFrom={hasDirectVideo ? startFrame : startFrame % 600}
-          endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 600) + durationInFrames}
-          playbackRate={config.speed || 1}
-          volume={config.originalVolume ?? 1}
-          crossOrigin="anonymous"
-          playsInline
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-            transform: `scale(${scale})`,
-          }}
-        />
-      </AbsoluteFill>
+      {/* 2. Direct Video Player Layer (If direct MP4/WebM video exists) */}
+      {hasDirectVideo && (
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Video
+            src={rawSource}
+            startFrom={startFrame}
+            endAt={startFrame + durationInFrames}
+            playbackRate={config.speed || 1}
+            volume={config.originalVolume ?? 1}
+            playsInline
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${scale})`,
+            }}
+          />
+        </AbsoluteFill>
+      )}
 
       {/* B-Roll Segments */}
       {Array.isArray(config?.broll) &&

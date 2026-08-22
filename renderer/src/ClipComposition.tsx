@@ -101,12 +101,24 @@ const isDirectVideo = (url?: string | null): boolean => {
   )
 }
 
+const getResolvedThumbnail = (config: ClipConfiguration): string => {
+  if (config.thumbnailUrl) return config.thumbnailUrl
+  if (config.youtubeVideoId) {
+    return `https://i.ytimg.com/vi/${config.youtubeVideoId}/hqdefault.jpg`
+  }
+  const raw = config.sourceVideo || ''
+  const ytMatch = raw.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/)
+  if (ytMatch) {
+    return `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`
+  }
+  return 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1280&q=80'
+}
+
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
+  const frame = useCurrentFrame()
   const { width, height } = useVideoConfig()
 
   // Smart reframing: position the crop window over the detected subject.
-  // For smart mode the crop center comes from upstream subject detection
-  // stored in config.crop; center mode locks to the middle.
   const cropX = config.crop.mode === 'center' ? 0.5 : config.crop.x
   const cropY = config.crop.mode === 'center' ? 0.5 : config.crop.y
 
@@ -116,30 +128,87 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
   const rawSourceVideo = (config.sourceVideo || '').trim()
   const isDirect = isDirectVideo(rawSourceVideo)
-  const sourceVideo = isDirect
-    ? rawSourceVideo
-    : 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
+  const resolvedThumbnail = getResolvedThumbnail(config)
+
+  const kenBurnsScale = interpolate(frame, [0, Math.max(30, durationInFrames)], [1.02, 1.15], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
+  const kenBurnsPanY = interpolate(frame, [0, Math.max(30, durationInFrames)], [0, -35], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
 
   return (
-    <AbsoluteFill style={{ backgroundColor: '#000' }}>
-      {/* Primary Video / Backdrop */}
+    <AbsoluteFill style={{ backgroundColor: '#090B10' }}>
+      {/* 1. Underlying Cinematic Footage / Motion Visual Engine */}
       <AbsoluteFill style={{ overflow: 'hidden' }}>
-        <OffthreadVideo
-          src={sourceVideo}
-          startFrom={isDirect ? startFrame : startFrame % 600}
-          endAt={isDirect ? endFrame : (startFrame % 600) + durationInFrames}
-          playbackRate={config.speed || 1}
-          volume={config.originalVolume ?? 1}
-          crossOrigin="anonymous"
+        <Img
+          src={resolvedThumbnail}
           style={{
-            width: '100%',
-            height: '100%',
+            position: 'absolute',
+            width: '120%',
+            height: '120%',
+            left: '-10%',
+            top: '-10%',
             objectFit: 'cover',
-            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-            transform: `scale(${config.crop.scale})`,
+            filter: 'blur(45px) brightness(0.45) saturate(1.4)',
+            transform: `scale(${kenBurnsScale})`,
+          }}
+        />
+
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden',
+          }}
+        >
+          <Img
+            src={resolvedThumbnail}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${config.crop.scale * kenBurnsScale}) translateY(${kenBurnsPanY}px)`,
+              filter: 'contrast(1.05) saturate(1.1)',
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background:
+              'linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0.2) 65%, rgba(0,0,0,0.85) 100%)',
           }}
         />
       </AbsoluteFill>
+
+      {/* 2. Direct Video Player Layer if source is raw MP4/WebM */}
+      {isDirect && (
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <OffthreadVideo
+            src={rawSourceVideo}
+            startFrom={startFrame}
+            endAt={endFrame}
+            playbackRate={config.speed || 1}
+            volume={config.originalVolume ?? 1}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${config.crop.scale})`,
+            }}
+          />
+        </AbsoluteFill>
+      )}
 
       {/* Standalone original audio stream if video has no embedded audio or source is audio-only */}
       {config.originalAudioUrl && config.originalAudioUrl !== sourceVideo && (

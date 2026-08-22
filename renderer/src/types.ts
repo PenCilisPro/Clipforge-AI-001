@@ -76,6 +76,8 @@ export interface ClipConfiguration {
     logoUrl: string | null
     watermarkText: string | null
   }
+  thumbnailUrl?: string | null
+  youtubeVideoId?: string | null
   originalVolume?: number
   originalAudioUrl?: string | null
   voiceVolume: number

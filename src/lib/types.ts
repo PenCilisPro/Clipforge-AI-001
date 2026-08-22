@@ -329,6 +329,8 @@ export interface ClipConfiguration {
     logoUrl: string | null
     watermarkText: string | null
   }
+  thumbnailUrl?: string | null
+  youtubeVideoId?: string | null
   originalVolume?: number
   originalAudioUrl?: string | null
   voiceVolume: number
@@ -582,8 +584,23 @@ export function normalizeClipConfiguration(
     duckMusic: rawVoice?.duckMusic !== false,
   }
 
+  // Extract thumbnail and YouTube ID
+  let youtubeVideoId: string | null = null
+  const combinedUrl = (rawConfig?.sourceVideo || context?.sourceUrl || '')
+  const ytMatch = combinedUrl.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/)
+  if (ytMatch) {
+    youtubeVideoId = ytMatch[1]
+  }
+
+  const thumbnailUrl =
+    context?.thumbnailUrl ||
+    clip?.current_thumbnail_url ||
+    (youtubeVideoId ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg` : null)
+
   return {
     sourceVideo,
+    thumbnailUrl,
+    youtubeVideoId,
     startTime,
     endTime,
     aspectRatio: '9:16',
