@@ -118,7 +118,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const isDirect = isDirectVideo(rawSourceVideo)
   const sourceVideo = isDirect
     ? rawSourceVideo
-    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+    : 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -126,8 +126,8 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       <AbsoluteFill style={{ overflow: 'hidden' }}>
         <OffthreadVideo
           src={sourceVideo}
-          startFrom={isDirect ? startFrame : startFrame % 900}
-          endAt={isDirect ? endFrame : (startFrame % 900) + durationInFrames}
+          startFrom={isDirect ? startFrame : startFrame % 600}
+          endAt={isDirect ? endFrame : (startFrame % 600) + durationInFrames}
           playbackRate={config.speed || 1}
           volume={config.originalVolume ?? 1}
           style={{

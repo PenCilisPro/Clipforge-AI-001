@@ -121,10 +121,10 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const rawSource = (config?.sourceVideo || '').trim()
   const hasDirectVideo = isDirectVideo(rawSource)
 
-  // Primary video URL: use the direct video source if provided, or high-speed resilient 10-minute HD sample stream
+  // Primary video URL: use the direct video source if provided, or high-speed resilient vertical/landscape HD stream
   const sourceVideo = hasDirectVideo
     ? rawSource
-    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+    : 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
 
   // Pulsing ambient background glow
   const glowOpacity = interpolate(
@@ -151,11 +151,10 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       <AbsoluteFill style={{ overflow: 'hidden' }}>
         <Video
           src={sourceVideo}
-          startFrom={hasDirectVideo ? startFrame : startFrame % 900}
-          endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 900) + durationInFrames}
+          startFrom={hasDirectVideo ? startFrame : startFrame % 600}
+          endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 600) + durationInFrames}
           playbackRate={config.speed || 1}
           volume={config.originalVolume ?? 1}
-          crossOrigin="anonymous"
           playsInline
           style={{
             width: '100%',

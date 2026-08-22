@@ -17,27 +17,34 @@ export const Captions: React.FC<CaptionsProps> = ({ words, style, clipStart = 0 
   const currentSeconds = frame / FPS
   const clipDuration = durationInFrames / FPS
 
-  if (!words || words.length === 0) return null
+  if (!words || !Array.isArray(words) || words.length === 0) return null
 
-  // Determine if input word timestamps are absolute (from full video start) or relative (0 to clip duration)
-  const maxStart = Math.max(...words.map((w) => w.start || 0))
-  const isAbsolute = clipStart > 0 && maxStart >= clipStart - 1.0
+  const validWords = words.filter((w) => w && typeof w.text === 'string' && w.text.trim().length > 0)
+  if (validWords.length === 0) return null
+
+  // Calculate timestamp bounds of raw words
+  const minStart = Math.min(...validWords.map((w) => (typeof w.start === 'number' ? w.start : 0)))
+  const maxStart = Math.max(...validWords.map((w) => (typeof w.start === 'number' ? w.start : 0)))
+
+  // Words are ONLY absolute if the FIRST word starts near or after clipStart, and words are in the clip's absolute timeline
+  const isAbsolute = clipStart > 2 && minStart >= (clipStart - 1.5) && maxStart > clipStart
 
   // Normalize words to strictly [0, clipDuration] relative timeframe
-  const normalizedWords: CaptionWordConfig[] = words
+  const normalizedWords: CaptionWordConfig[] = validWords
     .map((w) => {
       const s = isAbsolute ? (w.start ?? 0) - clipStart : (w.start ?? 0)
       const e = isAbsolute ? (w.end ?? s + 0.3) - clipStart : (w.end ?? s + 0.3)
       return {
         text: String(w.text || '').trim(),
         start: Math.max(0, Number(s.toFixed(2))),
-        end: Math.max(s + 0.1, Number(e.toFixed(2))),
+        end: Math.max(s + 0.12, Number(e.toFixed(2))),
       }
     })
     .filter((w) => {
-      // Keep words that occur during this clip playback window
-      return w.text.length > 0 && w.end >= -0.2 && w.start <= clipDuration + 0.5
+      // Keep words that are within or close to this clip duration window
+      return w.end >= 0 && w.start <= clipDuration + 1.0
     })
+    .sort((a, b) => a.start - b.start)
 
   if (normalizedWords.length === 0) return null
 
@@ -48,16 +55,35 @@ export const Captions: React.FC<CaptionsProps> = ({ words, style, clipStart = 0 
   }
 
   // Find active group for the current playback second
-  const activeGroup = groups.find((g) => {
+  // First try to find a group that directly contains currentSeconds
+  let activeGroup = groups.find((g) => {
     const groupStart = g[0].start
     const groupEnd = g[g.length - 1].end
-    return currentSeconds >= groupStart - 0.08 && currentSeconds <= groupEnd + 0.22
+    return currentSeconds >= groupStart - 0.12 && currentSeconds <= groupEnd + 0.28
   })
 
-  if (!activeGroup) return null
+  // If between groups or at boundary, fallback to the group closest to current playback time
+  if (!activeGroup) {
+    activeGroup = groups.find((g, idx) => {
+      const groupStart = g[0].start
+      const nextGroupStart = groups[idx + 1] ? groups[idx + 1][0].start : clipDuration + 5
+      return currentSeconds >= groupStart && currentSeconds < nextGroupStart
+    })
+  }
+
+  // Fallback to first or last group if within range
+  if (!activeGroup) {
+    if (currentSeconds < normalizedWords[0].start && currentSeconds >= 0) {
+      activeGroup = groups[0]
+    } else if (currentSeconds >= normalizedWords[normalizedWords.length - 1].end && currentSeconds <= clipDuration) {
+      activeGroup = groups[groups.length - 1]
+    }
+  }
+
+  if (!activeGroup || activeGroup.length === 0) return null
 
   const groupStartFrame = Math.max(0, Math.round(activeGroup[0].start * FPS))
-  const appear = interpolate(frame - groupStartFrame, [0, 4], [0, 1], {
+  const appear = interpolate(frame - groupStartFrame, [0, 3], [0.3, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })

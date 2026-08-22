@@ -398,19 +398,22 @@ Example JSON output:
  * Procedural word-by-word timing generator based on natural English speech pacing
  */
 function generateProceduralWordTimestamps(clip: Clip, duration: number): CaptionWordConfig[] {
-  const hook = clip.hook || `Here is the secret to ${clip.title}`
-  const body = `If you want to master ${clip.topic || 'this skill'}, you have to stop doing what everyone else is doing. Focus on high-leverage execution and consistency every single day.`
-  const fullSentence = `${hook}. ${body}`
-  const rawWords = fullSentence.split(/\s+/).filter(Boolean)
+  const hook = (clip.hook || clip.title || 'Here is the key breakdown').trim()
+  const topic = (clip.topic || clip.category || 'viral strategy').trim()
+  
+  // Construct a punchy spoken narrative tailored to the clip
+  const fullSentence = `${hook}. When you look at how top creators master ${topic}, they focus on high-retention execution, crystal clear delivery, and relentless consistency every single day.`
+  const rawWords = fullSentence.split(/\s+/).filter((w) => w && w.trim().length > 0)
 
   const words: CaptionWordConfig[] = []
-  const wordPacing = Math.min(0.45, Math.max(0.22, duration / (rawWords.length + 4)))
+  const safeDuration = Math.max(3, duration)
+  const wordPacing = Math.min(0.42, Math.max(0.22, (safeDuration - 0.5) / Math.max(1, rawWords.length)))
 
-  let currentTime = 0.1
-  for (let i = 0; i < rawWords.length && currentTime < duration - 0.2; i++) {
+  let currentTime = 0.05
+  for (let i = 0; i < rawWords.length && currentTime < safeDuration - 0.1; i++) {
     const word = rawWords[i]
-    const wordDuration = Math.max(0.18, word.length * 0.05 + (wordPacing - 0.1))
-    const endTime = Math.min(duration, currentTime + wordDuration)
+    const wordDuration = Math.max(0.18, Math.min(0.55, word.length * 0.045 + (wordPacing - 0.08)))
+    const endTime = Math.min(safeDuration, currentTime + wordDuration)
 
     words.push({
       text: word,
@@ -418,7 +421,7 @@ function generateProceduralWordTimestamps(clip: Clip, duration: number): Caption
       end: Number(endTime.toFixed(2)),
     })
 
-    currentTime = Number((endTime + 0.06).toFixed(2))
+    currentTime = Number((endTime + 0.04).toFixed(2))
   }
 
   return words
