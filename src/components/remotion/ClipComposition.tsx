@@ -374,7 +374,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       )}
 
       {/* Standalone original audio stream if video has no embedded audio or source is audio-only */}
-      {config?.originalAudioUrl && config.originalAudioUrl !== sourceVideo && (
+      {config?.originalAudioUrl && config.originalAudioUrl !== rawSource && (
         <Audio
           src={config.originalAudioUrl}
           startFrom={startFrame}

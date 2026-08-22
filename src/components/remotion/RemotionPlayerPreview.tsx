@@ -258,30 +258,34 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
               </button>
               <span className="text-[11px] font-semibold text-zinc-200">Original Audio</span>
             </div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setOriginalVolume(1.0)
-                  setIsOriginalMuted(false)
-                  onUpdateConfig?.({ originalVolume: 1.0 })
-                }}
-                className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300 hover:bg-surface-700"
-              >
-                100%
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setOriginalVolume(1.5)
-                  setIsOriginalMuted(false)
-                  onUpdateConfig?.({ originalVolume: 1.5 })
-                }}
-                className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-medium text-brand-300 hover:bg-brand-500/30"
-              >
-                +50%
-              </button>
-              <span className="font-mono text-[10px] text-brand-400 w-9 text-right font-medium">
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOriginalVolume(1.0)
+                    setIsOriginalMuted(false)
+                    onUpdateConfig?.({ originalVolume: 1.0 })
+                  }}
+                  className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-300 transition-colors hover:bg-surface-700 hover:text-white"
+                  title="Reset to 100% volume"
+                >
+                  1x
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOriginalVolume(1.5)
+                    setIsOriginalMuted(false)
+                    onUpdateConfig?.({ originalVolume: 1.5 })
+                  }}
+                  className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-brand-300 transition-colors hover:bg-brand-500/30"
+                  title="Boost volume to 150%"
+                >
+                  1.5x
+                </button>
+              </div>
+              <span className="rounded border border-brand-500/30 bg-brand-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-brand-400 min-w-[44px] text-center">
                 {isOriginalMuted ? 'MUTED' : `${Math.round(originalVolume * 100)}%`}
               </span>
             </div>
@@ -331,34 +335,36 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
                   {config.music.title || 'Soundtrack'}
                 </span>
               </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMusicVolume(0.35)
-                    setIsMusicMuted(false)
-                    if (config.music) {
-                      onUpdateConfig?.({ music: { ...config.music, volume: 0.35 } })
-                    }
-                  }}
-                  className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300 hover:bg-surface-700"
-                >
-                  35%
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMusicVolume(0.7)
-                    setIsMusicMuted(false)
-                    if (config.music) {
-                      onUpdateConfig?.({ music: { ...config.music, volume: 0.7 } })
-                    }
-                  }}
-                  className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-medium text-brand-300 hover:bg-brand-500/30"
-                >
-                  70%
-                </button>
-                <span className="font-mono text-[10px] text-brand-400 w-9 text-right font-medium">
+              <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMusicVolume(0.35)
+                      setIsMusicMuted(false)
+                      if (config.music) {
+                        onUpdateConfig?.({ music: { ...config.music, volume: 0.35 } })
+                      }
+                    }}
+                    className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-300 hover:bg-surface-700"
+                  >
+                    35%
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMusicVolume(0.7)
+                      setIsMusicMuted(false)
+                      if (config.music) {
+                        onUpdateConfig?.({ music: { ...config.music, volume: 0.7 } })
+                      }
+                    }}
+                    className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-brand-300 hover:bg-brand-500/30"
+                  >
+                    70%
+                  </button>
+                </div>
+                <span className="rounded border border-brand-500/30 bg-brand-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-brand-400 min-w-[44px] text-center">
                   {isMusicMuted ? 'MUTED' : `${Math.round(musicVolume * 100)}%`}
                 </span>
               </div>

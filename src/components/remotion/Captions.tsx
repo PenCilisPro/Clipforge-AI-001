@@ -103,7 +103,12 @@ export const Captions: React.FC<CaptionsProps> = ({ words, style, clipStart = 0 
       style={{
         justifyContent,
         alignItems: 'center',
-        padding: style.position === 'top' ? '140px 40px 60px' : style.position === 'center' ? '60px 40px' : '60px 40px 180px',
+        padding:
+          style.position === 'top'
+            ? '180px 40px 60px'
+            : style.position === 'center'
+            ? '60px 40px'
+            : '60px 40px 380px',
         pointerEvents: 'none',
       }}
     >

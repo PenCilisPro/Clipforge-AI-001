@@ -1219,6 +1219,160 @@ export default function ClipStudio() {
               </div>
             </div>
           </div>
+
+          {/* Interactive Script & Word-by-Word Timeline Editor */}
+          <div className="card flex flex-1 flex-col p-4 bg-surface-900 border-surface-800">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-brand-400" />
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                  Interactive Transcript & Timeline
+                </h3>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleSyncFromTranscript()}
+                  disabled={syncingTranscript}
+                  className="inline-flex items-center gap-1 rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-1 text-[11px] font-medium text-emerald-300 transition-colors hover:bg-emerald-500/25"
+                  title="Resync word timings from original project transcript"
+                >
+                  {syncingTranscript ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-3 w-3" />
+                  )}
+                  Sync from Source
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!config) return
+                    const duration = Math.max(3, (config.endTime ?? 30) - (config.startTime ?? 0))
+                    const realigned = realignWordsEvenly(config.captions.words, duration)
+                    update({ captions: { ...config.captions, words: realigned } })
+                    showNotification('Realigned word timings evenly across duration.')
+                  }}
+                  className="inline-flex items-center gap-1 rounded bg-surface-800 border border-surface-700 px-2 py-1 text-[11px] font-medium text-zinc-300 transition-colors hover:bg-surface-750"
+                  title="Re-space words evenly"
+                >
+                  Even Spacing
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddWord}
+                  className="inline-flex items-center gap-1 rounded bg-brand-500/20 border border-brand-500/30 px-2 py-1 text-[11px] font-medium text-brand-300 transition-colors hover:bg-brand-500/30"
+                >
+                  <Plus className="h-3 w-3" /> Add Word
+                </button>
+              </div>
+            </div>
+
+            {/* Script Text Box / Quick Read */}
+            {scriptText && (
+              <div className="mb-3 rounded-lg border border-surface-750 bg-surface-950/60 p-3 text-xs leading-relaxed text-zinc-300">
+                <span className="font-semibold text-brand-400">Full Clip Script: </span>
+                {scriptText}
+              </div>
+            )}
+
+            {/* Interactive Word Chips Grid */}
+            {config.captions.words && config.captions.words.length > 0 ? (
+              <div className="flex-1 space-y-2">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                  <span>Click any word to edit text or timing:</span>
+                  <span className="font-mono text-brand-400">{config.captions.words.length} words detected</span>
+                </div>
+                <div className="flex max-h-72 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-surface-750 bg-surface-950/40 p-2.5 scroll-touch">
+                  {config.captions.words.map((w, idx) => (
+                    <div
+                      key={idx}
+                      className="group relative flex items-center gap-1 rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs transition-all hover:border-brand-500/60 hover:bg-surface-800"
+                    >
+                      <input
+                        type="text"
+                        value={w.text}
+                        onChange={(e) => handleUpdateWord(idx, 'text', e.target.value)}
+                        className="bg-transparent font-medium text-white focus:outline-none w-auto min-w-[30px]"
+                        style={{ width: `${Math.max(3, w.text.length + 1)}ch` }}
+                      />
+                      <span className="font-mono text-[9px] text-zinc-500 group-hover:text-zinc-400">
+                        {w.start.toFixed(1)}s
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteWord(idx)}
+                        className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 ml-0.5"
+                        title="Delete word"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-surface-750 p-6 text-center">
+                <Type className="mb-2 h-8 w-8 text-zinc-600" />
+                <p className="text-xs font-medium text-zinc-300">No Captions Generated Yet</p>
+                <p className="mt-1 text-[11px] text-zinc-500 max-w-sm">
+                  Generate word-by-word synced viral captions using Whisper AI or sync from your project transcript.
+                </p>
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleGenerateCaptions()}
+                    disabled={generatingCaptions}
+                    className="btn-primary !py-1.5 !px-3 text-xs"
+                  >
+                    {generatingCaptions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                    Generate Captions
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSyncFromTranscript()}
+                    disabled={syncingTranscript}
+                    className="btn-secondary !py-1.5 !px-3 text-xs"
+                  >
+                    Sync from Video
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Multi-Track Visual Layer Status */}
+            <div className="mt-3 grid grid-cols-3 gap-2 border-t border-surface-800 pt-3 text-[11px]">
+              <div className="flex items-center gap-2 rounded-lg bg-surface-850 p-2 text-zinc-300">
+                <Mic className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="font-semibold text-white truncate">Voice Narration</p>
+                  <p className="text-[10px] text-zinc-400 truncate">
+                    {config.voiceover?.enabled !== false ? (config.voiceover?.voiceId || 'Alex Viral') : 'Muted'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 rounded-lg bg-surface-850 p-2 text-zinc-300">
+                <Layers className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="font-semibold text-white truncate">B-Roll Overlays</p>
+                  <p className="text-[10px] text-zinc-400 truncate">
+                    {config.broll.length > 0 ? `${config.broll.length} Active Scenes` : 'None added'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 rounded-lg bg-surface-850 p-2 text-zinc-300">
+                <Music className="h-3.5 w-3.5 text-brand-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="font-semibold text-white truncate">Soundtrack</p>
+                  <p className="text-[10px] text-zinc-400 truncate">
+                    {config.music?.title || 'No background music'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* RIGHT: Main Inspector Tabs */}
