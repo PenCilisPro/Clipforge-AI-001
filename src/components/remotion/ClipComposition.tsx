@@ -132,7 +132,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const startFrame = Math.max(0, Math.round(startTime * FPS))
 
   const rawSource = (config?.sourceVideo || '').trim()
-  const hasDirectVideo = isDirectVideo(rawSource)
+
   const resolvedThumbnail = getResolvedThumbnail(config)
 
   // Cinematic Ken-Burns subtle motion for backdrops
