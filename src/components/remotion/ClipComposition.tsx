@@ -254,7 +254,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       </AbsoluteFill>
 
       {/* 2. Direct Video Player Layer (If direct MP4/WebM video exists) */}
-      {hasDirectVideo && (
+      {rawSource && (
         <AbsoluteFill style={{ overflow: 'hidden' }}>
           <Video
             src={rawSource}
