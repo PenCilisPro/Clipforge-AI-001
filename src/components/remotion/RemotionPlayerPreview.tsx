@@ -99,8 +99,16 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
     const player = playerRef.current
     if (!player) return
 
-    const onPlay = () => {
-      // Synthesize voice narration when voiceover is active (enabled by default or configured) and not muted
+    const handlePlayState = () => {
+      const isPlaying = player.isPlaying()
+      
+      if (!isPlaying) {
+        LiveVoiceSynthesizer.stop()
+        setIsSpeaking(false)
+        return
+      }
+
+      // Synthesize voice narration when voiceover is active and playing
       if (config.voiceover?.enabled !== false && !config.voiceUrl && scriptText && !isVoiceMuted && voiceVolume > 0) {
         setIsSpeaking(true)
         LiveVoiceSynthesizer.speak(scriptText, {
@@ -113,19 +121,18 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
       }
     }
 
-    const onPause = () => {
-      LiveVoiceSynthesizer.stop()
-      setIsSpeaking(false)
-    }
+    const onPlay = () => handlePlayState()
+    const onPause = () => handlePlayState()
+    const onSeeked = () => handlePlayState()
 
     player.addEventListener('play', onPlay)
     player.addEventListener('pause', onPause)
-    player.addEventListener('seeked', onPause)
+    player.addEventListener('seeked', onSeeked)
 
     return () => {
       player.removeEventListener('play', onPlay)
       player.removeEventListener('pause', onPause)
-      player.removeEventListener('seeked', onPause)
+      player.removeEventListener('seeked', onSeeked)
       LiveVoiceSynthesizer.stop()
     }
   }, [config.voiceover, config.voiceUrl, scriptText, actor, isVoiceMuted, voiceVolume])
