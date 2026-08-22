@@ -155,27 +155,40 @@ export default function Layout() {
   )
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex min-h-[100dvh] h-[100dvh] overflow-hidden bg-surface-950">
       <div className="hidden md:block">{sidebar}</div>
 
       {mobileOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setMobileOpen(false)} />
-          <div className="absolute inset-y-0 left-0 z-50">{sidebar}</div>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
+          <div className="absolute inset-y-0 left-0 z-50 shadow-2xl">{sidebar}</div>
         </div>
       )}
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-surface-700 bg-surface-900 px-4 py-3 md:hidden">
-          <button onClick={() => setMobileOpen(!mobileOpen)} className="btn-ghost !px-2">
-            {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-          </button>
-          <span className="font-bold">
-            ClipForge <span className="text-brand-500">AI</span>
-          </span>
+      <div className="flex min-w-0 flex-1 flex-col h-full overflow-hidden">
+        <header className="flex items-center justify-between border-b border-surface-700 bg-surface-900 px-4 py-3 md:hidden shrink-0 z-20">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="btn-ghost !p-2 -ml-1 text-zinc-300 hover:text-white"
+              aria-label="Toggle Navigation Menu"
+            >
+              {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            </button>
+            <span className="font-bold text-base tracking-tight">
+              ClipForge <span className="text-brand-500">AI</span>
+            </span>
+          </div>
+          <Link
+            to="/create"
+            className="flex items-center gap-1 rounded-lg bg-brand-500/20 px-2.5 py-1 text-xs font-semibold text-brand-300 border border-brand-500/30"
+          >
+            <PlusCircle className="h-3.5 w-3.5" />
+            <span>New</span>
+          </Link>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-6 lg:p-8">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-3.5 sm:p-5 md:p-6 lg:p-8 scroll-touch">
           <Outlet />
         </main>
       </div>

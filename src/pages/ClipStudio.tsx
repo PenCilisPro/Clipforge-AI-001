@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -21,8 +21,11 @@ import {
   Layers,
   CheckCircle2,
   Play,
+  Pause,
   Mic,
   Volume2,
+  VolumeX,
+  Upload,
   Square,
 } from 'lucide-react'
 import { supabase, invokeFunction } from '@/lib/supabase'
@@ -214,6 +217,8 @@ export default function ClipStudio() {
   )
   const [musicSearching, setMusicSearching] = useState(false)
   const [musicError, setMusicError] = useState<string | null>(null)
+  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null)
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null)
 
   // Voice & Audio state
   const [testingVoice, setTestingVoice] = useState(false)
@@ -655,6 +660,77 @@ export default function ClipStudio() {
     }
   }
 
+  // Audio track preview player
+  function togglePlayTrack(track: MusicSearchResult) {
+    if (!previewAudioRef.current) {
+      previewAudioRef.current = new Audio()
+    }
+    const audio = previewAudioRef.current
+
+    if (playingTrackId === track.externalId) {
+      audio.pause()
+      setPlayingTrackId(null)
+      return
+    }
+
+    audio.pause()
+    audio.src = track.audioUrl
+    audio.volume = 0.6
+    audio.onended = () => setPlayingTrackId(null)
+    audio.onerror = () => {
+      setPlayingTrackId(null)
+      showNotification(`Could not stream preview for "${track.title}"`)
+    }
+
+    audio
+      .play()
+      .then(() => {
+        setPlayingTrackId(track.externalId)
+      })
+      .catch((err) => {
+        console.warn('Audio play failed:', err)
+        setPlayingTrackId(null)
+      })
+  }
+
+  // Handle upload of custom MP3/audio track
+  function handleUploadCustomMusic(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const objectUrl = URL.createObjectURL(file)
+    const newTrack: MusicSearchResult = {
+      externalId: `custom-upload-${Date.now()}`,
+      title: file.name.replace(/\.[^/.]+$/, ''),
+      artist: 'Custom Upload',
+      audioUrl: objectUrl,
+      duration: 120,
+    }
+
+    setMusicResults((prev) => [newTrack, ...prev])
+    update({
+      music: {
+        audioUrl: objectUrl,
+        volume: config?.music?.volume ?? 0.12,
+        fadeIn: 1,
+        fadeOut: 1,
+        trimStart: 0,
+        title: newTrack.title,
+      },
+    })
+    showNotification(`Added custom background music: "${newTrack.title}"`)
+  }
+
+  // Stop music on tab switch or unmount
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current.src = ''
+      }
+    }
+  }, [])
+
   // Voice narration script text derived from captions or hook
   const scriptText = useMemo(() => {
     if (config?.captions?.words && config.captions.words.length > 0) {
@@ -1011,7 +1087,7 @@ export default function ClipStudio() {
 
         {/* RIGHT: Main Inspector Tabs */}
         <div className="card flex flex-col p-4 bg-surface-900 border-surface-800">
-          <div className="mb-4 flex border-b border-surface-700 pb-2 overflow-x-auto">
+          <div className="mb-4 flex border-b border-surface-700 pb-2 overflow-x-auto gap-1 scroll-touch">
             {(
               [
                 { id: 'captions', label: 'Captions', icon: Type },
@@ -1028,20 +1104,20 @@ export default function ClipStudio() {
                   key={t.id}
                   onClick={() => setTab(t.id)}
                   className={classNames(
-                    'flex flex-1 items-center justify-center gap-1.5 border-b-2 py-2 px-2 text-xs font-semibold whitespace-nowrap transition-colors',
+                    'flex flex-1 min-h-[42px] items-center justify-center gap-1.5 border-b-2 py-2 px-2.5 text-xs font-semibold whitespace-nowrap transition-colors rounded-t-lg',
                     active
-                      ? 'border-brand-500 text-brand-400'
-                      : 'border-transparent text-zinc-400 hover:text-zinc-200',
+                      ? 'border-brand-500 bg-brand-500/10 text-brand-400'
+                      : 'border-transparent text-zinc-400 hover:text-zinc-200 hover:bg-surface-800/60',
                   )}
                 >
-                  <Icon className="h-3.5 w-3.5" />
+                  <Icon className="h-4 w-4 shrink-0" />
                   {t.label}
                 </button>
               )
             })}
           </div>
 
-          <div className="flex-1 space-y-4 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
+          <div className="flex-1 space-y-4 lg:overflow-y-auto lg:max-h-[calc(100vh-220px)] pr-1 scroll-touch">
             {/* VOICE & AUDIO TAB */}
             {tab === 'voice' && (
               <div className="space-y-4">
@@ -2044,142 +2120,56 @@ export default function ClipStudio() {
             {/* MUSIC TAB */}
             {tab === 'music' && (
               <div className="space-y-4">
-                <div className="flex gap-2">
-                  <input
-                    className="input text-xs"
-                    placeholder="Search Jamendo royalty-free music (e.g. phonk, cyberpunk, lofi, cinematic)..."
-                    value={musicQuery}
-                    onChange={(e) => setMusicQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && void searchMusic()}
-                  />
-                  <button
-                    onClick={() => void searchMusic()}
-                    disabled={musicSearching}
-                    className="btn-secondary !px-3"
-                    title="Search Jamendo Library"
-                  >
-                    {musicSearching ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Search className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-
-                {/* Genre & Vibe Filter Pills */}
-                <div className="flex flex-wrap gap-1.5 pb-1">
-                  {[
-                    { id: 'all', label: 'All' },
-                    { id: 'tech', label: 'Cyberpunk & Tech' },
-                    { id: 'phonk', label: 'Phonk & Viral' },
-                    { id: 'cinematic', label: 'Cinematic Epic' },
-                    { id: 'lofi', label: 'Lofi Chill' },
-                    { id: 'corporate', label: 'Corporate' },
-                  ].map((cat) => (
-                    <button
-                      key={cat.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedMusicCategory(cat.id)
-                        void searchMusic(cat.id)
-                      }}
-                      className={`text-[11px] px-2.5 py-1 rounded-full border transition-all ${
-                        selectedMusicCategory === cat.id
-                          ? 'bg-brand-500/20 text-brand-300 border-brand-500/50 font-medium'
-                          : 'bg-surface-800/80 text-zinc-400 border-surface-700 hover:text-zinc-200 hover:border-surface-600'
-                      }`}
-                    >
-                      {cat.label}
-                    </button>
-                  ))}
-                </div>
-
-                {musicError && <div className="text-xs text-amber-400 bg-amber-500/10 p-2 rounded border border-amber-500/30">{musicError}</div>}
-
-                {/* Jamendo Track List */}
-                {musicResults.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[11px] font-medium text-zinc-400 flex items-center gap-1.5">
-                      <Music className="h-3.5 w-3.5 text-brand-400" />
-                      Royalty-Free Tracks ({musicResults.length})
-                    </p>
-                    <ul className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                      {musicResults.map((m) => {
-                        const isCurrent = config.music?.audioUrl === m.audioUrl
-                        return (
-                          <li
-                            key={m.externalId}
-                            className={`flex items-center gap-2.5 rounded-lg border p-2.5 transition-colors ${
-                              isCurrent
-                                ? 'border-brand-500/60 bg-brand-500/10'
-                                : 'border-surface-700/80 bg-surface-850 hover:border-surface-600'
-                            }`}
-                          >
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs font-semibold text-white">{m.title}</p>
-                              <p className="truncate text-[11px] text-zinc-400">{m.artist}</p>
-                            </div>
-                            <audio
-                              src={m.audioUrl}
-                              controls
-                              className="h-7 w-28 opacity-80 hover:opacity-100"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                update({
-                                  music: {
-                                    audioUrl: m.audioUrl,
-                                    volume: config.music?.volume ?? 0.12,
-                                    fadeIn: 1,
-                                    fadeOut: 1,
-                                    trimStart: 0,
-                                    title: m.title,
-                                  },
-                                })
-                                showNotification(`Set background music: "${m.title}"`)
-                              }}
-                              className={`!py-1 !px-2.5 text-xs font-medium rounded ${
-                                isCurrent
-                                  ? 'bg-brand-500 text-white shadow-sm'
-                                  : 'btn-secondary'
-                              }`}
-                            >
-                              {isCurrent ? 'Active' : 'Use'}
-                            </button>
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </div>
-                )}
-
+                {/* Active Background Music Card */}
                 {config.music ? (
-                  <div className="space-y-3 rounded-lg border border-brand-500/40 p-3 bg-brand-950/20">
+                  <div className="rounded-xl border border-brand-500/40 p-3.5 bg-brand-950/25 space-y-3 shadow-sm">
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Music className="h-4 w-4 text-brand-400" />
-                        <p className="text-xs font-medium text-brand-200">
-                          Active: {config.music.title ?? 'Custom Track'}
-                        </p>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-500/20 text-brand-400">
+                          <Music className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <span className="block truncate text-xs font-semibold text-brand-200">
+                            {config.music.title ?? 'Selected Soundtrack'}
+                          </span>
+                          <span className="text-[10px] text-zinc-400">
+                            Auto-ducked under voices · Volume: {Math.round(config.music.volume * 100)}%
+                          </span>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => {
-                          update({ music: null })
-                          showNotification('Removed background music')
-                        }}
-                        className="btn-ghost !px-1.5 text-red-400 hover:text-red-300"
-                        title="Remove Music"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newVol = config.music?.volume === 0 ? 0.12 : 0
+                            update({ music: { ...config.music!, volume: newVol } })
+                          }}
+                          className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                            config.music.volume === 0
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-surface-800 text-zinc-300 hover:bg-surface-700'
+                          }`}
+                        >
+                          {config.music.volume === 0 ? <VolumeX className="h-3 w-3" /> : <Volume2 className="h-3 w-3" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            update({ music: null })
+                            showNotification('Removed background music')
+                          }}
+                          className="btn-ghost !p-1.5 text-red-400 hover:text-red-300"
+                          title="Remove Music"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <label className="text-[11px] text-zinc-400">
-                          Music Volume ({Math.round(config.music.volume * 100)}%)
-                        </label>
-                        <span className="text-[10px] text-zinc-500">Auto-ducked during speech</span>
+
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between items-center text-[11px]">
+                        <span className="text-zinc-400">Soundtrack Level</span>
+                        <span className="font-mono text-brand-300">{Math.round(config.music.volume * 100)}%</span>
                       </div>
                       <input
                         type="range"
@@ -2190,15 +2180,190 @@ export default function ClipStudio() {
                         onChange={(e) =>
                           update({ music: { ...config.music!, volume: Number(e.target.value) } })
                         }
-                        className="w-full accent-brand-500"
+                        className="w-full accent-brand-500 cursor-pointer"
                       />
                     </div>
                   </div>
                 ) : (
-                  <p className="text-xs text-zinc-500 text-center py-2">
-                    Select any Jamendo track above to add background music to your short clip.
-                  </p>
+                  <div className="rounded-xl border border-dashed border-surface-700 bg-surface-850/50 p-3 text-center">
+                    <p className="text-xs text-zinc-400">
+                      No background music selected. Preview and add a track below.
+                    </p>
+                  </div>
                 )}
+
+                {/* Upload Custom Music Track */}
+                <div className="flex items-center justify-between rounded-lg border border-surface-700/80 bg-surface-850 px-3 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <Upload className="h-4 w-4 text-brand-400" />
+                    <div>
+                      <p className="text-xs font-semibold text-white">Upload Your Music</p>
+                      <p className="text-[10px] text-zinc-400">MP3, WAV, or AAC audio file</p>
+                    </div>
+                  </div>
+                  <label className="btn-secondary !py-1 !px-2.5 text-xs font-medium cursor-pointer">
+                    <span>Browse</span>
+                    <input
+                      type="file"
+                      accept="audio/*,.mp3,.wav,.ogg,.m4a"
+                      className="hidden"
+                      onChange={handleUploadCustomMusic}
+                    />
+                  </label>
+                </div>
+
+                {/* Search and Filter */}
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      className="input text-xs"
+                      placeholder="Search royalty-free soundtracks (e.g. phonk, cyberpunk, lofi)..."
+                      value={musicQuery}
+                      onChange={(e) => setMusicQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && void searchMusic()}
+                    />
+                    <button
+                      onClick={() => void searchMusic()}
+                      disabled={musicSearching}
+                      className="btn-secondary !px-3"
+                      title="Search Tracks"
+                    >
+                      {musicSearching ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Search className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Genre & Vibe Filter Pills */}
+                  <div className="flex flex-wrap gap-1.5 pb-1">
+                    {[
+                      { id: 'all', label: 'All' },
+                      { id: 'tech', label: 'Cyberpunk & Tech' },
+                      { id: 'phonk', label: 'Phonk & Viral' },
+                      { id: 'cinematic', label: 'Cinematic Epic' },
+                      { id: 'lofi', label: 'Lofi Chill' },
+                      { id: 'corporate', label: 'Corporate' },
+                    ].map((cat) => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedMusicCategory(cat.id)
+                          void searchMusic(cat.id)
+                        }}
+                        className={`text-[11px] px-2.5 py-1 rounded-full border transition-all ${
+                          selectedMusicCategory === cat.id
+                            ? 'bg-brand-500/20 text-brand-300 border-brand-500/50 font-medium'
+                            : 'bg-surface-800/80 text-zinc-400 border-surface-700 hover:text-zinc-200 hover:border-surface-600'
+                        }`}
+                      >
+                        {cat.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {musicError && (
+                  <div className="text-xs text-amber-400 bg-amber-500/10 p-2 rounded border border-amber-500/30">
+                    {musicError}
+                  </div>
+                )}
+
+                {/* Track List with Interactive Play / Pause */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                      <Music className="h-3.5 w-3.5 text-brand-400" />
+                      Royalty-Free Tracks ({musicResults.length})
+                    </p>
+                    {playingTrackId && (
+                      <span className="flex items-center gap-1 text-[10px] text-brand-400 animate-pulse">
+                        <span className="h-1.5 w-1.5 rounded-full bg-brand-400" />
+                        Previewing track
+                      </span>
+                    )}
+                  </div>
+
+                  <ul className="space-y-2">
+                    {musicResults.map((m) => {
+                      const isCurrent = config.music?.audioUrl === m.audioUrl
+                      const isPlaying = playingTrackId === m.externalId
+
+                      return (
+                        <li
+                          key={m.externalId}
+                          className={`flex items-center justify-between gap-3 rounded-xl border p-2.5 transition-all ${
+                            isCurrent
+                              ? 'border-brand-500/60 bg-brand-500/10 shadow-sm'
+                              : isPlaying
+                              ? 'border-brand-400/40 bg-surface-800'
+                              : 'border-surface-700/80 bg-surface-850 hover:border-surface-600'
+                          }`}
+                        >
+                          {/* Play / Pause button */}
+                          <button
+                            type="button"
+                            onClick={() => togglePlayTrack(m)}
+                            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95 ${
+                              isPlaying
+                                ? 'bg-brand-500 text-white shadow-md'
+                                : 'bg-surface-750 text-zinc-200 hover:bg-brand-500 hover:text-white'
+                            }`}
+                            title={isPlaying ? 'Pause Preview' : 'Play Preview'}
+                          >
+                            {isPlaying ? (
+                              <Pause className="h-4 w-4 fill-current" />
+                            ) : (
+                              <Play className="h-4 w-4 fill-current ml-0.5" />
+                            )}
+                          </button>
+
+                          {/* Track Info & Equalizer Wave */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <p className="truncate text-xs font-semibold text-white">{m.title}</p>
+                              {isPlaying && (
+                                <span className="inline-flex items-center gap-0.5 text-brand-400">
+                                  <span className="h-2 w-0.5 animate-pulse bg-brand-400" />
+                                  <span className="h-3 w-0.5 animate-bounce bg-brand-400" />
+                                  <span className="h-2 w-0.5 animate-pulse bg-brand-400" />
+                                </span>
+                              )}
+                            </div>
+                            <p className="truncate text-[11px] text-zinc-400">{m.artist}</p>
+                          </div>
+
+                          {/* Action Button */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              update({
+                                music: {
+                                  audioUrl: m.audioUrl,
+                                  volume: config.music?.volume ?? 0.12,
+                                  fadeIn: 1,
+                                  fadeOut: 1,
+                                  trimStart: 0,
+                                  title: m.title,
+                                },
+                              })
+                              showNotification(`Set background music: "${m.title}"`)
+                            }}
+                            className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                              isCurrent
+                                ? 'bg-brand-500 text-white shadow-sm'
+                                : 'bg-surface-750 text-zinc-200 hover:bg-surface-700 hover:text-white border border-surface-600'
+                            }`}
+                          >
+                            {isCurrent ? 'Active ✓' : 'Use Track'}
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
               </div>
             )}
           </div>

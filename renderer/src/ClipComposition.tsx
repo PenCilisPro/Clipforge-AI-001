@@ -93,7 +93,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             startFrom={startFrame}
             endAt={endFrame}
             playbackRate={config.speed || 1}
-            volume={config?.originalAudioUrl ? 0 : (config.originalVolume ?? 1)}
+            volume={config.originalVolume ?? 1}
             style={{
               width: '100%',
               height: '100%',
@@ -118,12 +118,12 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
         </AbsoluteFill>
       )}
 
-      {/* Standalone original audio stream if provided (e.g. YouTube separate audio track) */}
-      {config.originalAudioUrl && (
+      {/* Standalone original audio stream if video has no embedded audio or source is image/audio-only */}
+      {config.originalAudioUrl && (!isDirectVideo(config.sourceVideo) || config.originalAudioUrl !== config.sourceVideo) && (
         <Audio
           src={config.originalAudioUrl}
           startFrom={startFrame}
-          volume={config.originalVolume ?? 1}
+          volume={isDirectVideo(config.sourceVideo) ? 0 : (config.originalVolume ?? 1)}
         />
       )}
 

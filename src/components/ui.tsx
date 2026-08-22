@@ -137,15 +137,24 @@ export function Modal({
 }) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4">
+      <div className="absolute inset-0 bg-black/80 backdrop-blur-xs" onClick={onClose} />
       <div
         className={classNames(
-          'card relative z-10 max-h-[90vh] w-full overflow-y-auto p-6',
+          'card relative z-10 max-h-[92dvh] w-full overflow-y-auto p-4 sm:p-6 scroll-touch shadow-2xl',
           wide ? 'max-w-3xl' : 'max-w-lg',
         )}
       >
-        <h2 className="mb-4 text-lg font-semibold">{title}</h2>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-base sm:text-lg font-semibold text-white">{title}</h2>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-zinc-400 hover:bg-surface-800 hover:text-white transition-colors"
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
         {children}
       </div>
     </div>
