@@ -453,7 +453,7 @@ export function normalizeClipConfiguration(
     sourceVideo = clip!.current_render_url!
   } else {
     // Default to a fast, reliable, pristine 1080p MP4 stream
-    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+    sourceVideo = 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
   }
 
   // Safe Caption Style

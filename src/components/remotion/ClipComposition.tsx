@@ -155,6 +155,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
           endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 600) + durationInFrames}
           playbackRate={config.speed || 1}
           volume={config.originalVolume ?? 1}
+          crossOrigin="anonymous"
           playsInline
           style={{
             width: '100%',
