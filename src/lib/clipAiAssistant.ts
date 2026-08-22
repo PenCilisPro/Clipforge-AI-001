@@ -1,5 +1,36 @@
 import type { Clip, CaptionWordConfig, BrollConfigItem } from './types'
 
+// Curated list of high-converting creator fonts for TikTok, Reels, and Shorts
+export interface CreatorFontOption {
+  id: string
+  name: string
+  category: 'Viral Classics' | 'Creator & Punchy' | 'Modern Tech' | 'Cinematic & Aesthetic' | 'Cartoon & Meme'
+  previewText?: string
+}
+
+export const CREATOR_FONTS: CreatorFontOption[] = [
+  { id: 'Impact', name: 'Impact', category: 'Viral Classics' },
+  { id: 'Bebas Neue', name: 'Bebas Neue', category: 'Viral Classics' },
+  { id: 'Anton', name: 'Anton', category: 'Creator & Punchy' },
+  { id: 'Montserrat', name: 'Montserrat', category: 'Viral Classics' },
+  { id: 'Poppins', name: 'Poppins', category: 'Viral Classics' },
+  { id: 'Rubik', name: 'Rubik', category: 'Creator & Punchy' },
+  { id: 'Outfit', name: 'Outfit', category: 'Modern Tech' },
+  { id: 'Bungee', name: 'Bungee', category: 'Creator & Punchy' },
+  { id: 'Fredoka', name: 'Fredoka', category: 'Cartoon & Meme' },
+  { id: 'Titan One', name: 'Titan One', category: 'Cartoon & Meme' },
+  { id: 'Luckiest Guy', name: 'Luckiest Guy', category: 'Cartoon & Meme' },
+  { id: 'Chakra Petch', name: 'Chakra Petch', category: 'Modern Tech' },
+  { id: 'Space Grotesk', name: 'Space Grotesk', category: 'Modern Tech' },
+  { id: 'Syne', name: 'Syne', category: 'Cinematic & Aesthetic' },
+  { id: 'Work Sans', name: 'Work Sans', category: 'Modern Tech' },
+  { id: 'Oswald', name: 'Oswald', category: 'Creator & Punchy' },
+  { id: 'Cinzel', name: 'Cinzel', category: 'Cinematic & Aesthetic' },
+  { id: 'Playfair Display', name: 'Playfair Display', category: 'Cinematic & Aesthetic' },
+  { id: 'Permanent Marker', name: 'Permanent Marker', category: 'Cartoon & Meme' },
+  { id: 'Inter', name: 'Inter', category: 'Viral Classics' },
+]
+
 // Curated high-performance royalty-free vertical & horizontal stock B-Roll video clips
 export interface StockVideoAsset {
   id: string
@@ -86,21 +117,120 @@ const getFallbackAiKey = () => {
 }
 
 /**
+ * Extracts accurately timed caption words from raw transcript segments for a specific clip interval.
+ * Returns word timestamps normalized relative to 0.0s (start of the clip).
+ */
+export function extractWordsFromTranscriptSegments(
+  segments: Array<{ start: number; end: number; text: string }>,
+  clipStartTime: number,
+  clipEndTime: number,
+): CaptionWordConfig[] {
+  if (!segments || !Array.isArray(segments) || segments.length === 0) return []
+
+  const clipDuration = Math.max(3, clipEndTime - clipStartTime)
+  const overlapping = segments.filter(
+    (s) => s.end >= clipStartTime - 0.2 && s.start <= clipEndTime + 0.2 && (s.text || '').trim().length > 0,
+  )
+
+  if (overlapping.length === 0) return []
+
+  const words: CaptionWordConfig[] = []
+
+  for (const seg of overlapping) {
+    const rawTokens = seg.text.trim().split(/\s+/).filter(Boolean)
+    if (rawTokens.length === 0) continue
+
+    const segStart = Math.max(0, seg.start - clipStartTime)
+    const segEnd = Math.min(clipDuration, seg.end - clipStartTime)
+    const segDur = Math.max(0.3, segEnd - segStart)
+    const tokenPacing = segDur / rawTokens.length
+
+    for (let i = 0; i < rawTokens.length; i++) {
+      const token = rawTokens[i]
+      const wStart = segStart + i * tokenPacing
+      const wEnd = Math.min(segEnd, wStart + Math.max(0.18, tokenPacing * 0.95))
+
+      if (wEnd >= 0 && wStart <= clipDuration + 0.2) {
+        words.push({
+          text: token,
+          start: Number(Math.max(0, wStart).toFixed(2)),
+          end: Number(Math.max(wStart + 0.15, wEnd).toFixed(2)),
+        })
+      }
+    }
+  }
+
+  return words
+}
+
+/**
+ * Shifts all word timestamps by a given delta in seconds (+/-) and clamps to 0.
+ */
+export function shiftWordTimings(words: CaptionWordConfig[], deltaSeconds: number): CaptionWordConfig[] {
+  return words.map((w) => {
+    const newStart = Math.max(0, Number((w.start + deltaSeconds).toFixed(2)))
+    const newEnd = Math.max(newStart + 0.1, Number((w.end + deltaSeconds).toFixed(2)))
+    return {
+      ...w,
+      start: newStart,
+      end: newEnd,
+    }
+  })
+}
+
+/**
+ * Re-distributes caption words evenly across the clip duration for a smooth, natural flow.
+ */
+export function realignWordsEvenly(words: CaptionWordConfig[], clipDuration: number): CaptionWordConfig[] {
+  if (!words || words.length === 0) return []
+  const safeDuration = Math.max(3, clipDuration)
+  const pacing = Math.min(0.5, Math.max(0.2, (safeDuration - 0.5) / words.length))
+
+  let current = 0.1
+  return words.map((w) => {
+    const duration = Math.max(0.18, w.text.length * 0.04 + (pacing - 0.08))
+    const end = Math.min(safeDuration, current + duration)
+    const item = {
+      text: w.text,
+      start: Number(current.toFixed(2)),
+      end: Number(end.toFixed(2)),
+    }
+    current = Number((end + 0.05).toFixed(2))
+    return item
+  })
+}
+
+/**
  * Generate synchronized word-level captions for a clip interval.
  * Supports OpenAI Whisper verbose_json API, NVIDIA NIM Whisper API, or AI Semantic Speech Timing Engine.
  */
 export async function generateWhisperCaptions({
   clip,
+  transcriptSegments,
   customApiKey,
   whisperAudioFile,
   language = 'en',
 }: {
   clip: Clip
+  transcriptSegments?: Array<{ start: number; end: number; text: string }>
   customApiKey?: string
   whisperAudioFile?: File
   language?: string
 }): Promise<CaptionWordConfig[]> {
   const clipDuration = Math.max(3, clip.duration || clip.end_time - clip.start_time || 30)
+
+  // 0. If transcript segments were provided from project processing, extract real speech first!
+  if (transcriptSegments && transcriptSegments.length > 0) {
+    const extracted = extractWordsFromTranscriptSegments(
+      transcriptSegments,
+      clip.start_time,
+      clip.end_time || clip.start_time + clipDuration,
+    )
+    if (extracted.length > 0) {
+      return extracted
+    }
+  }
+
   const apiKey =
     customApiKey?.trim() ||
     getStoredApiKey() ||

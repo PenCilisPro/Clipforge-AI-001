@@ -50,6 +50,10 @@ import {
   STOCK_BROLL_CATALOG,
   parseWhisperJson,
   getStoredApiKey,
+  extractWordsFromTranscriptSegments,
+  shiftWordTimings,
+  realignWordsEvenly,
+  CREATOR_FONTS,
   type StockVideoAsset,
 } from '@/lib/clipAiAssistant'
 import {
@@ -224,6 +228,12 @@ export default function ClipStudio() {
   const [testingVoice, setTestingVoice] = useState(false)
   const [generatingVoiceBlob, setGeneratingVoiceBlob] = useState(false)
 
+  // Captions & Font selection state
+  const [transcriptData, setTranscriptData] = useState<any>(null)
+  const [fontCategoryFilter, setFontCategoryFilter] = useState<string>('all')
+  const [customFontInput, setCustomFontInput] = useState<string>('')
+  const [syncingTranscript, setSyncingTranscript] = useState(false)
+
   const [previewMode, setPreviewMode] = useState<'live' | 'rendered'>('live')
 
   const showNotification = (msg: string) => {
@@ -268,6 +278,9 @@ export default function ClipStudio() {
       setClip(loadedClip)
       setVersions(loadedVersions)
       setActiveJob(((jobsRes.data as RenderJob[]) ?? [])[0] ?? null)
+      if (transcriptRes.data) {
+        setTranscriptData(transcriptRes.data)
+      }
 
       setConfig((prev) => {
         if (prev) return prev
@@ -399,6 +412,81 @@ export default function ClipStudio() {
     }
   }
 
+  // Sync exact speech from the video transcript for this clip's time range
+  async function handleSyncFromTranscript() {
+    if (!clip || !config) return
+    setSyncingTranscript(true)
+    setError(null)
+    try {
+      let segments = transcriptData?.segments
+      if (!segments || !Array.isArray(segments) || segments.length === 0) {
+        const res = await supabase
+          .from('transcripts')
+          .select('*')
+          .eq('project_id', clip.project_id)
+          .maybeSingle()
+        if (res.data?.segments) {
+          segments = res.data.segments
+          setTranscriptData(res.data)
+        }
+      }
+
+      if (segments && Array.isArray(segments) && segments.length > 0) {
+        const words = extractWordsFromTranscriptSegments(
+          segments,
+          clip.start_time,
+          clip.end_time || clip.start_time + 30,
+        )
+        if (words.length > 0) {
+          update({
+            captions: {
+              ...config.captions,
+              enabled: true,
+              words,
+            },
+          })
+          setCaptionsSubTab('words')
+          showNotification(`Synced ${words.length} speech words directly from video transcript!`)
+          return
+        }
+      }
+
+      // If no pre-existing transcript segments, generate via AI timing with clip metadata
+      await handleGenerateCaptions()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to sync captions from transcript.')
+    } finally {
+      setSyncingTranscript(false)
+    }
+  }
+
+  // Shift all word timestamps (+/- seconds)
+  function handleShiftTimings(delta: number) {
+    if (!config || !config.captions.words || config.captions.words.length === 0) return
+    const shifted = shiftWordTimings(config.captions.words, delta)
+    update({
+      captions: {
+        ...config.captions,
+        words: shifted,
+      },
+    })
+    showNotification(`Shifted caption timings by ${delta > 0 ? `+${delta}` : delta}s`)
+  }
+
+  // Re-distribute words evenly across clip duration
+  function handleRealignWords() {
+    if (!config || !config.captions.words || config.captions.words.length === 0 || !clip) return
+    const clipDuration = clip.duration || clip.end_time - clip.start_time || 30
+    const realigned = realignWordsEvenly(config.captions.words, clipDuration)
+    update({
+      captions: {
+        ...config.captions,
+        words: realigned,
+      },
+    })
+    showNotification('Re-distributed caption words evenly across clip!')
+  }
+
   // Generate captions using OpenAI Whisper or AI Timing Engine
   async function handleGenerateCaptions() {
     if (!clip || !config) return
@@ -407,6 +495,7 @@ export default function ClipStudio() {
     try {
       const words = await generateWhisperCaptions({
         clip,
+        transcriptSegments: transcriptData?.segments,
         customApiKey: openAiKey,
       })
 
@@ -1461,35 +1550,55 @@ export default function ClipStudio() {
             {/* CAPTIONS TAB */}
             {tab === 'captions' && (
               <div className="space-y-4">
-                {/* Master toggle */}
-                <div className="flex items-center justify-between rounded-lg bg-surface-850 p-3">
-                  <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={config.captions.enabled}
-                      onChange={(e) =>
-                        update({ captions: { ...config.captions, enabled: e.target.checked } })
-                      }
-                      className="h-4 w-4 rounded accent-brand-500"
-                    />
-                    <span>Captions Enabled</span>
-                  </label>
+                {/* Master toggle & Quick Sync Actions */}
+                <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-white cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={config.captions.enabled}
+                        onChange={(e) =>
+                          update({ captions: { ...config.captions, enabled: e.target.checked } })
+                        }
+                        className="h-4 w-4 rounded accent-brand-500"
+                      />
+                      <span>Captions Overlay Active</span>
+                    </label>
 
-                  <button
-                    onClick={() => void handleGenerateCaptions()}
-                    disabled={generatingCaptions}
-                    className="btn-primary !py-1 !px-2.5 text-xs"
-                  >
-                    {generatingCaptions ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : (
-                      <Sparkles className="h-3 w-3" />
-                    )}
-                    Generate AI Captions
-                  </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleSyncFromTranscript()}
+                        disabled={syncingTranscript || generatingCaptions}
+                        className="rounded-lg bg-emerald-500/20 px-2.5 py-1 text-xs font-semibold text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 flex items-center gap-1.5 transition-colors"
+                        title="Extract and align exact spoken words directly from video transcript"
+                      >
+                        {syncingTranscript ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Volume2 className="h-3.5 w-3.5" />
+                        )}
+                        Sync to Video Speech
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleGenerateCaptions()}
+                        disabled={generatingCaptions || syncingTranscript}
+                        className="btn-primary !py-1 !px-2.5 text-xs flex items-center gap-1.5"
+                      >
+                        {generatingCaptions ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                        )}
+                        AI Whisper Timings
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                {/* Sub tabs: Style Presets vs Word-by-Word Timings vs Whisper API */}
+                {/* Sub tabs: Style & Fonts vs Word Timings vs Whisper API */}
                 <div className="flex rounded-lg bg-surface-800 p-1 text-xs">
                   <button
                     type="button"
@@ -1498,7 +1607,7 @@ export default function ClipStudio() {
                       captionsSubTab === 'presets' ? 'bg-surface-700 text-white' : 'text-zinc-400'
                     }`}
                   >
-                    Style & Presets
+                    Font & Viral Style
                   </button>
                   <button
                     type="button"
@@ -1507,7 +1616,7 @@ export default function ClipStudio() {
                       captionsSubTab === 'words' ? 'bg-surface-700 text-white' : 'text-zinc-400'
                     }`}
                   >
-                    Words ({config.captions.words?.length || 0})
+                    Word Timings ({config.captions.words?.length || 0})
                   </button>
                   <button
                     type="button"
@@ -1520,12 +1629,116 @@ export default function ClipStudio() {
                   </button>
                 </div>
 
-                {/* PRESETS SUBTAB */}
+                {/* STYLE & FONTS SUBTAB */}
                 {captionsSubTab === 'presets' && (
                   <div className="space-y-4">
+                    {/* 1. Viral Font Picker */}
+                    <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="text-xs font-semibold text-white flex items-center gap-1.5">
+                            <Type className="h-3.5 w-3.5 text-brand-400" /> Caption Font Family
+                          </label>
+                          <p className="text-[11px] text-zinc-400">
+                            Select from viral creator fonts or enter your own custom typeface
+                          </p>
+                        </div>
+                        <span className="rounded bg-brand-500/20 px-2 py-0.5 text-xs font-bold text-brand-300 font-mono">
+                          {config.captions.style.font || 'Inter'}
+                        </span>
+                      </div>
+
+                      {/* Font Category Filters */}
+                      <div className="flex flex-wrap gap-1">
+                        {[
+                          { id: 'all', label: 'All Fonts' },
+                          { id: 'Viral Classics', label: '🔥 Viral Classics' },
+                          { id: 'Creator & Punchy', label: '⚡ Hormozi & Punchy' },
+                          { id: 'Modern Tech', label: '🚀 Tech & Clean' },
+                          { id: 'Cartoon & Meme', label: '🎨 Pop & Gaming' },
+                          { id: 'Cinematic & Aesthetic', label: '✨ Aesthetic' },
+                        ].map((cat) => (
+                          <button
+                            key={cat.id}
+                            type="button"
+                            onClick={() => setFontCategoryFilter(cat.id)}
+                            className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                              fontCategoryFilter === cat.id
+                                ? 'bg-brand-500 text-white shadow-sm'
+                                : 'bg-surface-800 text-zinc-400 hover:text-zinc-200 hover:bg-surface-750'
+                            }`}
+                          >
+                            {cat.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Font Visual Grid */}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1">
+                        {CREATOR_FONTS.filter(
+                          (f) => fontCategoryFilter === 'all' || f.category === fontCategoryFilter,
+                        ).map((font) => {
+                          const isSelected = (config.captions.style.font || 'Inter').toLowerCase() === font.id.toLowerCase()
+                          return (
+                            <button
+                              key={font.id}
+                              type="button"
+                              onClick={() => updateStyle({ font: font.id })}
+                              className={`flex flex-col items-start justify-between rounded-lg border p-2.5 text-left transition-all ${
+                                isSelected
+                                  ? 'border-brand-500 bg-brand-500/15 text-white ring-1 ring-brand-500'
+                                  : 'border-surface-750 bg-surface-900/70 hover:border-surface-600 text-zinc-300'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <span className="text-[10px] text-zinc-400">{font.category}</span>
+                                {isSelected && <Check className="h-3 w-3 text-brand-400" />}
+                              </div>
+                              <span
+                                className="text-sm font-bold mt-1 truncate w-full"
+                                style={{ fontFamily: `"${font.id}", sans-serif` }}
+                              >
+                                {font.name}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+
+                      {/* Custom Font Input */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <input
+                          type="text"
+                          placeholder="Or type any Google/System font name (e.g. Impact, Poppins, Outfit)"
+                          value={customFontInput}
+                          onChange={(e) => setCustomFontInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && customFontInput.trim()) {
+                              updateStyle({ font: customFontInput.trim() })
+                              showNotification(`Font changed to "${customFontInput.trim()}"`)
+                            }
+                          }}
+                          className="input flex-1 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (customFontInput.trim()) {
+                              updateStyle({ font: customFontInput.trim() })
+                              showNotification(`Font changed to "${customFontInput.trim()}"`)
+                            }
+                          }}
+                          className="btn-secondary !py-1.5 !px-3 text-xs"
+                        >
+                          Apply Font
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2. 1-Click Viral Style Presets */}
                     <div>
                       <label className="label">1-Click Viral Style Presets</label>
-                      <div className="grid grid-cols-1 gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {PRESET_STYLES.map((p) => (
                           <button
                             key={p.name}
@@ -1533,12 +1746,12 @@ export default function ClipStudio() {
                             onClick={() => updateStyle(p.style)}
                             className="flex items-center justify-between rounded-lg border border-surface-700 bg-surface-850 p-2.5 text-left transition-all hover:border-brand-500/50 hover:bg-surface-800"
                           >
-                            <div>
+                            <div className="min-w-0 pr-2">
                               <p className="text-xs font-semibold text-zinc-200">{p.name}</p>
-                              <p className="text-[11px] text-zinc-400">{p.desc}</p>
+                              <p className="text-[11px] text-zinc-400 truncate">{p.desc}</p>
                             </div>
                             <span
-                              className="rounded px-2 py-1 text-xs font-bold font-mono"
+                              className="rounded px-2 py-1 text-xs font-bold font-mono shrink-0"
                               style={{
                                 color: p.style.highlightColor,
                                 backgroundColor: '#18181b',
@@ -1551,86 +1764,177 @@ export default function ClipStudio() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="label">Font Family</label>
-                        <select
-                          className="input text-xs"
-                          value={config.captions.style.font}
-                          onChange={(e) => updateStyle({ font: e.target.value })}
-                        >
-                          <option>Inter</option>
-                          <option>Montserrat</option>
-                          <option>Bebas Neue</option>
-                          <option>Poppins</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="label">Font Size ({config.captions.style.fontSize}px)</label>
-                        <input
-                          type="number"
-                          min={24}
-                          max={80}
-                          className="input text-xs"
-                          value={config.captions.style.fontSize}
-                          onChange={(e) => updateStyle({ fontSize: Number(e.target.value) })}
-                        />
-                      </div>
-                      <div>
-                        <label className="label">Animation</label>
-                        <select
-                          className="input text-xs"
-                          value={config.captions.style.animation}
-                          onChange={(e) =>
-                            updateStyle({ animation: e.target.value as CaptionStyle['animation'] })
-                          }
-                        >
-                          <option value="karaoke">Karaoke (Active Highlight)</option>
-                          <option value="pop">Pop (Bouncy Word Scale)</option>
-                          <option value="slide">Slide In</option>
-                          <option value="none">Static Subtitle</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="label">Screen Position</label>
-                        <select
-                          className="input text-xs"
-                          value={config.captions.style.position}
-                          onChange={(e) =>
-                            updateStyle({ position: e.target.value as CaptionStyle['position'] })
-                          }
-                        >
-                          <option value="bottom">Bottom (Classic)</option>
-                          <option value="center">Center (High Impact)</option>
-                          <option value="top">Top</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="label">Active Highlight Color</label>
-                        <div className="flex items-center gap-2">
+                    {/* 3. Typography & Styling Controls */}
+                    <div className="rounded-xl border border-surface-700 bg-surface-850 p-3.5 space-y-3">
+                      <h4 className="text-xs font-semibold text-white">Typography & Placement</h4>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {/* Font Size */}
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <label className="label !mb-0 text-[11px]">Font Size</label>
+                            <span className="font-mono text-xs text-brand-400">
+                              {config.captions.style.fontSize}px
+                            </span>
+                          </div>
                           <input
-                            type="color"
-                            className="h-8 w-12 cursor-pointer rounded border border-surface-700 bg-surface-800"
-                            value={config.captions.style.highlightColor}
-                            onChange={(e) => updateStyle({ highlightColor: e.target.value })}
+                            type="range"
+                            min={24}
+                            max={90}
+                            step={2}
+                            value={config.captions.style.fontSize}
+                            onChange={(e) => updateStyle({ fontSize: Number(e.target.value) })}
+                            className="w-full accent-brand-500"
                           />
-                          <span className="text-xs font-mono text-zinc-400">
-                            {config.captions.style.highlightColor}
-                          </span>
+                        </div>
+
+                        {/* Font Weight */}
+                        <div className="space-y-1">
+                          <label className="label !mb-0 text-[11px]">Font Weight</label>
+                          <select
+                            className="input text-xs"
+                            value={config.captions.style.weight || 900}
+                            onChange={(e) => updateStyle({ weight: Number(e.target.value) })}
+                          >
+                            <option value={400}>400 (Regular)</option>
+                            <option value={600}>600 (Semi Bold)</option>
+                            <option value={700}>700 (Bold)</option>
+                            <option value={800}>800 (Extra Bold)</option>
+                            <option value={900}>900 (Black / Heavy)</option>
+                          </select>
+                        </div>
+
+                        {/* Text Outline Stroke */}
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <label className="label !mb-0 text-[11px]">Text Stroke</label>
+                            <span className="font-mono text-xs text-zinc-400">
+                              {config.captions.style.strokeWidth || 6}px
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={16}
+                            step={1}
+                            value={config.captions.style.strokeWidth ?? 6}
+                            onChange={(e) => updateStyle({ strokeWidth: Number(e.target.value) })}
+                            className="w-full accent-brand-500"
+                          />
+                        </div>
+
+                        {/* Animation */}
+                        <div className="space-y-1">
+                          <label className="label !mb-0 text-[11px]">Animation Mode</label>
+                          <select
+                            className="input text-xs"
+                            value={config.captions.style.animation}
+                            onChange={(e) =>
+                              updateStyle({ animation: e.target.value as CaptionStyle['animation'] })
+                            }
+                          >
+                            <option value="karaoke">Karaoke (Active Word Highlight)</option>
+                            <option value="pop">Pop (Bouncy Word Scale)</option>
+                            <option value="slide">Slide In Motion</option>
+                            <option value="none">Static Subtitle</option>
+                          </select>
+                        </div>
+
+                        {/* Screen Position */}
+                        <div className="space-y-1">
+                          <label className="label !mb-0 text-[11px]">Position</label>
+                          <select
+                            className="input text-xs"
+                            value={config.captions.style.position}
+                            onChange={(e) =>
+                              updateStyle({ position: e.target.value as CaptionStyle['position'] })
+                            }
+                          >
+                            <option value="bottom">Bottom (Classic Short)</option>
+                            <option value="center">Center (High Engagement)</option>
+                            <option value="top">Top Header</option>
+                          </select>
+                        </div>
+
+                        {/* Text Alignment */}
+                        <div className="space-y-1">
+                          <label className="label !mb-0 text-[11px]">Alignment</label>
+                          <select
+                            className="input text-xs"
+                            value={config.captions.style.alignment || 'center'}
+                            onChange={(e) =>
+                              updateStyle({ alignment: e.target.value as 'center' | 'left' | 'right' })
+                            }
+                          >
+                            <option value="center">Center</option>
+                            <option value="left">Left</option>
+                            <option value="right">Right</option>
+                          </select>
                         </div>
                       </div>
-                      <div>
-                        <label className="label">Default Text Color</label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="color"
-                            className="h-8 w-12 cursor-pointer rounded border border-surface-700 bg-surface-800"
-                            value={config.captions.style.textColor}
-                            onChange={(e) => updateStyle({ textColor: e.target.value })}
-                          />
-                          <span className="text-xs font-mono text-zinc-400">
-                            {config.captions.style.textColor}
-                          </span>
+
+                      {/* Colors & Neon Highlight Palette */}
+                      <div className="pt-2 border-t border-surface-750 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Active Highlight Color */}
+                        <div className="space-y-2">
+                          <label className="label !mb-0 text-[11px]">Active Highlight Color</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              className="h-8 w-10 cursor-pointer rounded border border-surface-700 bg-surface-800"
+                              value={config.captions.style.highlightColor}
+                              onChange={(e) => updateStyle({ highlightColor: e.target.value })}
+                            />
+                            <div className="flex flex-wrap gap-1">
+                              {[
+                                { name: 'Yellow', hex: '#FACC15' },
+                                { name: 'Green', hex: '#22C55E' },
+                                { name: 'Cyan', hex: '#00F2FE' },
+                                { name: 'Pink', hex: '#EC4899' },
+                                { name: 'Orange', hex: '#F97316' },
+                                { name: 'White', hex: '#FFFFFF' },
+                              ].map((c) => (
+                                <button
+                                  key={c.hex}
+                                  type="button"
+                                  onClick={() => updateStyle({ highlightColor: c.hex })}
+                                  className="h-6 w-6 rounded-full border border-black/40 shadow-sm transition-transform hover:scale-110"
+                                  style={{ backgroundColor: c.hex }}
+                                  title={c.name}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Base Text Color */}
+                        <div className="space-y-2">
+                          <label className="label !mb-0 text-[11px]">Default Text Color</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              className="h-8 w-10 cursor-pointer rounded border border-surface-700 bg-surface-800"
+                              value={config.captions.style.textColor}
+                              onChange={(e) => updateStyle({ textColor: e.target.value })}
+                            />
+                            <div className="flex flex-wrap gap-1">
+                              {[
+                                { name: 'White', hex: '#FFFFFF' },
+                                { name: 'Light Gray', hex: '#E2E8F0' },
+                                { name: 'Cream', hex: '#FEF3C7' },
+                                { name: 'Cyan Tint', hex: '#CFFAFE' },
+                              ].map((c) => (
+                                <button
+                                  key={c.hex}
+                                  type="button"
+                                  onClick={() => updateStyle({ textColor: c.hex })}
+                                  className="h-6 w-6 rounded-full border border-black/40 shadow-sm transition-transform hover:scale-110"
+                                  style={{ backgroundColor: c.hex }}
+                                  title={c.name}
+                                />
+                              ))}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1640,29 +1944,100 @@ export default function ClipStudio() {
                 {/* WORD TIMINGS SUBTAB */}
                 {captionsSubTab === 'words' && (
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-400">
-                        {config.captions.words?.length || 0} word timings synced to Remotion player
-                      </span>
-                      <button onClick={handleAddWord} className="btn-secondary !py-1 !px-2 text-xs">
-                        <Plus className="h-3.5 w-3.5" /> Add Word
-                      </button>
+                    {/* Word Timing Actions Bar */}
+                    <div className="rounded-xl border border-surface-700 bg-surface-850 p-3 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-zinc-200">
+                          {config.captions.words?.length || 0} Synced Words
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void handleSyncFromTranscript()}
+                            disabled={syncingTranscript}
+                            className="rounded bg-emerald-500/20 px-2 py-1 text-[11px] font-semibold text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 flex items-center gap-1"
+                          >
+                            <Volume2 className="h-3 w-3" /> Sync Speech
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleRealignWords}
+                            className="rounded bg-surface-750 px-2 py-1 text-[11px] font-medium text-zinc-300 hover:bg-surface-700"
+                            title="Distribute words evenly across the clip duration"
+                          >
+                            Even Cadence
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleAddWord}
+                            className="btn-primary !py-1 !px-2 text-xs flex items-center gap-1"
+                          >
+                            <Plus className="h-3.5 w-3.5" /> Add Word
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Timing Offset / Nudge Toolbar */}
+                      <div className="flex items-center justify-between border-t border-surface-750 pt-2 text-[11px]">
+                        <span className="text-zinc-400">Nudge all timings:</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleShiftTimings(-0.5)}
+                            className="rounded bg-surface-800 px-1.5 py-0.5 text-zinc-300 hover:bg-surface-700 hover:text-white"
+                          >
+                            -0.5s
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleShiftTimings(-0.1)}
+                            className="rounded bg-surface-800 px-1.5 py-0.5 text-zinc-300 hover:bg-surface-700 hover:text-white"
+                          >
+                            -0.1s
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleShiftTimings(+0.1)}
+                            className="rounded bg-surface-800 px-1.5 py-0.5 text-zinc-300 hover:bg-surface-700 hover:text-white"
+                          >
+                            +0.1s
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleShiftTimings(+0.5)}
+                            className="rounded bg-surface-800 px-1.5 py-0.5 text-zinc-300 hover:bg-surface-700 hover:text-white"
+                          >
+                            +0.5s
+                          </button>
+                        </div>
+                      </div>
                     </div>
 
                     {(!config.captions.words || config.captions.words.length === 0) ? (
                       <div className="rounded-lg border border-dashed border-surface-700 p-6 text-center">
                         <Type className="mx-auto h-8 w-8 text-zinc-500" />
                         <p className="mt-2 text-xs text-zinc-400">No caption words generated yet.</p>
-                        <button
-                          onClick={() => void handleGenerateCaptions()}
-                          disabled={generatingCaptions}
-                          className="btn-primary mt-3 !py-1.5 text-xs mx-auto"
-                        >
-                          <Sparkles className="h-3.5 w-3.5" /> Generate with OpenAI Whisper
-                        </button>
+                        <div className="flex justify-center gap-2 mt-3">
+                          <button
+                            type="button"
+                            onClick={() => void handleSyncFromTranscript()}
+                            disabled={syncingTranscript}
+                            className="btn-secondary !py-1.5 text-xs"
+                          >
+                            <Volume2 className="h-3.5 w-3.5" /> Sync from Video Speech
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerateCaptions()}
+                            disabled={generatingCaptions}
+                            className="btn-primary !py-1.5 text-xs"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" /> Generate AI Whisper
+                          </button>
+                        </div>
                       </div>
                     ) : (
-                      <div className="space-y-1.5 max-h-[340px] overflow-y-auto pr-1">
+                      <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
                         {config.captions.words.map((word, idx) => (
                           <div
                             key={idx}
@@ -1699,6 +2074,7 @@ export default function ClipStudio() {
                               />
                             </div>
                             <button
+                              type="button"
                               onClick={() => handleDeleteWord(idx)}
                               className="text-zinc-500 hover:text-red-400 p-1"
                               title="Delete word"
@@ -1743,6 +2119,7 @@ export default function ClipStudio() {
                           className="input flex-1 text-xs font-mono"
                         />
                         <button
+                          type="button"
                           onClick={() => {
                             const defaultKey = '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'
                             handleSaveOpenAiKey(defaultKey)
@@ -1760,18 +2137,33 @@ export default function ClipStudio() {
                         </p>
                       )}
 
-                      <div className="pt-1">
+                      <div className="pt-1 flex gap-2">
                         <button
+                          type="button"
+                          onClick={() => void handleSyncFromTranscript()}
+                          disabled={syncingTranscript}
+                          className="btn-secondary flex-1 !py-2 text-xs justify-center flex items-center gap-1.5"
+                        >
+                          {syncingTranscript ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+                          )}
+                          Extract from Video Speech
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => void handleGenerateCaptions()}
                           disabled={generatingCaptions}
-                          className="btn-primary w-full !py-2 text-xs justify-center flex items-center gap-1.5"
+                          className="btn-primary flex-1 !py-2 text-xs justify-center flex items-center gap-1.5"
                         >
                           {generatingCaptions ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
                           ) : (
                             <Sparkles className="h-3.5 w-3.5 text-amber-300" />
                           )}
-                          {generatingCaptions ? 'Transcribing Word Sync...' : 'Generate Synced Captions with Whisper Now'}
+                          AI Whisper Transcription
                         </button>
                       </div>
                     </div>
@@ -1792,6 +2184,7 @@ export default function ClipStudio() {
                         className="input w-full font-mono text-[11px]"
                       />
                       <button
+                        type="button"
                         onClick={handleImportWhisperJson}
                         className="btn-secondary !py-1.5 text-xs w-full justify-center"
                       >

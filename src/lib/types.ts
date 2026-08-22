@@ -457,7 +457,39 @@ export function normalizeClipConfiguration(
     })).filter((w: CaptionWordConfig) => w.text.length > 0)
   }
 
-  // If words are still empty, build words from transcript or hook
+  // If words are still empty and transcript segments exist, extract directly from real video speech!
+  if (words.length === 0 && context?.transcript?.segments && Array.isArray(context.transcript.segments) && context.transcript.segments.length > 0) {
+    const clipDuration = Math.max(3, endTime - startTime)
+    const overlapping = context.transcript.segments.filter(
+      (s: any) => s.end >= startTime - 0.2 && s.start <= endTime + 0.2 && (s.text || '').trim().length > 0,
+    )
+
+    if (overlapping.length > 0) {
+      for (const seg of overlapping) {
+        const rawTokens = String(seg.text).trim().split(/\s+/).filter(Boolean)
+        if (rawTokens.length === 0) continue
+        const segStart = Math.max(0, seg.start - startTime)
+        const segEnd = Math.min(clipDuration, seg.end - startTime)
+        const segDur = Math.max(0.3, segEnd - segStart)
+        const tokenPacing = segDur / rawTokens.length
+
+        for (let i = 0; i < rawTokens.length; i++) {
+          const token = rawTokens[i]
+          const wStart = segStart + i * tokenPacing
+          const wEnd = Math.min(clipDuration, wStart + Math.max(0.18, tokenPacing * 0.95))
+          if (wEnd >= 0 && wStart <= clipDuration + 0.2) {
+            words.push({
+              text: token,
+              start: Number(Math.max(0, wStart).toFixed(2)),
+              end: Number(Math.max(wStart + 0.15, wEnd).toFixed(2)),
+            })
+          }
+        }
+      }
+    }
+  }
+
+  // If words are still empty, build words from hook or viral sentence
   if (words.length === 0 && clip) {
     const duration = Math.max(3, endTime - startTime)
     const hook = clip.hook || `Here is the secret about ${clip.title}`
