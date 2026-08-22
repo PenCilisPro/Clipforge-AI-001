@@ -586,7 +586,14 @@ export default function ClipStudio() {
     setError(null)
     try {
       const [words, brollItems] = await Promise.all([
-        generateWhisperCaptions({ clip, customApiKey: openAiKey }),
+        generateWhisperCaptions({
+          clip,
+          transcriptSegments: transcriptData?.segments,
+          customApiKey: openAiKey,
+          sourceMediaUrl: config.sourceVideo || undefined,
+          startTime: config.startTime ?? clip.start_time,
+          endTime: config.endTime ?? clip.end_time,
+        }),
         autoGenerateBrollWithAi({ clip, customApiKey: openAiKey }),
       ])
 

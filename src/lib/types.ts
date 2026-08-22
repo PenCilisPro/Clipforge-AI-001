@@ -414,10 +414,33 @@ export function normalizeClipConfiguration(
   const isVideoExt = (url?: string | null) => {
     if (!url) return false
     const l = url.trim().toLowerCase()
-    if (l.endsWith('.jpg') || l.endsWith('.jpeg') || l.endsWith('.png') || l.endsWith('.webp') || l.includes('i.ytimg.com') || l.includes('images.unsplash.com')) {
+    if (
+      l.includes('youtube.com/watch') ||
+      l.includes('youtube.com/shorts') ||
+      l.includes('youtu.be/') ||
+      l.includes('vimeo.com/') ||
+      l.endsWith('.jpg') ||
+      l.endsWith('.jpeg') ||
+      l.endsWith('.png') ||
+      l.endsWith('.webp') ||
+      l.endsWith('.gif') ||
+      l.includes('i.ytimg.com') ||
+      l.includes('images.unsplash.com')
+    ) {
       return false
     }
-    return l.includes('.mp4') || l.includes('.webm') || l.includes('.mov') || l.includes('blob:') || l.includes('commondatastorage.googleapis.com') || l.includes('storage.googleapis.com') || l.includes('supabase.co/storage')
+    return (
+      l.includes('.mp4') ||
+      l.includes('.webm') ||
+      l.includes('.mov') ||
+      l.includes('.m4v') ||
+      l.includes('.m3u8') ||
+      l.includes('blob:') ||
+      l.includes('commondatastorage.googleapis.com') ||
+      l.includes('storage.googleapis.com') ||
+      l.includes('supabase.co/storage') ||
+      l.includes('googlevideo.com')
+    )
   }
 
   if (isVideoExt(rawConfig?.sourceVideo)) {
@@ -428,10 +451,11 @@ export function normalizeClipConfiguration(
     sourceVideo = context!.sourceUrl!.trim()
   } else if (isVideoExt(clip?.current_render_url)) {
     sourceVideo = clip!.current_render_url!
-  } else if (isVideoExt(clip?.current_thumbnail_url)) {
-    sourceVideo = clip!.current_thumbnail_url!
+  } else if (context?.thumbnailUrl || clip?.current_thumbnail_url) {
+    // Preserve thumbnail image URL for Ken Burns motion photo canvas
+    sourceVideo = (context?.thumbnailUrl || clip?.current_thumbnail_url)!.trim()
   } else {
-    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
+    sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
   }
 
   // Safe Caption Style

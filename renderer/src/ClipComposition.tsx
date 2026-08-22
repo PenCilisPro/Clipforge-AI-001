@@ -65,18 +65,25 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
 
 const isDirectVideo = (url?: string | null): boolean => {
   if (!url) return false
-  const lower = url.toLowerCase()
+  const lower = url.trim().toLowerCase()
   if (
-    (lower.endsWith('.jpg') ||
-      lower.endsWith('.jpeg') ||
-      lower.endsWith('.png') ||
-      lower.endsWith('.webp') ||
-      lower.includes('images.unsplash.com') ||
-      lower.includes('i.ytimg.com') ||
-      lower.includes('ytimg.com')) &&
-    !lower.includes('.mp4') &&
-    !lower.includes('video') &&
-    !lower.includes('blob:')
+    lower.includes('youtube.com/watch') ||
+    lower.includes('youtube.com/shorts') ||
+    lower.includes('youtu.be/') ||
+    lower.includes('vimeo.com/') ||
+    lower.includes('tiktok.com/')
+  ) {
+    return false
+  }
+  if (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp') ||
+    lower.endsWith('.gif') ||
+    lower.includes('images.unsplash.com') ||
+    lower.includes('i.ytimg.com') ||
+    lower.includes('ytimg.com')
   ) {
     return false
   }
@@ -90,7 +97,7 @@ const isDirectVideo = (url?: string | null): boolean => {
     lower.includes('googlevideo.com') ||
     lower.includes('storage.googleapis.com') ||
     lower.includes('supabase.co/storage') ||
-    lower.startsWith('http')
+    lower.includes('commondatastorage.googleapis.com')
   )
 }
 
@@ -107,11 +114,11 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const endFrame = Math.round(config.endTime * FPS)
   const durationInFrames = Math.max(30, endFrame - startFrame)
 
-  const rawSourceVideo = config.sourceVideo || ''
+  const rawSourceVideo = (config.sourceVideo || '').trim()
   const isDirect = isDirectVideo(rawSourceVideo)
   const sourceVideo = isDirect
     ? rawSourceVideo
-    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
+    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -119,8 +126,8 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       <AbsoluteFill style={{ overflow: 'hidden' }}>
         <OffthreadVideo
           src={sourceVideo}
-          startFrom={startFrame}
-          endAt={endFrame}
+          startFrom={isDirect ? startFrame : startFrame % 900}
+          endAt={isDirect ? endFrame : (startFrame % 900) + durationInFrames}
           playbackRate={config.speed || 1}
           volume={config.originalVolume ?? 1}
           style={{

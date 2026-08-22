@@ -68,18 +68,26 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
 
 const isDirectVideo = (url?: string | null): boolean => {
   if (!url) return false
-  const lower = url.toLowerCase()
+  const lower = url.trim().toLowerCase()
+  // Reject web page URLs that cannot be played directly by HTML <video>
   if (
-    (lower.endsWith('.jpg') ||
-      lower.endsWith('.jpeg') ||
-      lower.endsWith('.png') ||
-      lower.endsWith('.webp') ||
-      lower.includes('images.unsplash.com') ||
-      lower.includes('i.ytimg.com') ||
-      lower.includes('ytimg.com')) &&
-    !lower.includes('.mp4') &&
-    !lower.includes('video') &&
-    !lower.includes('blob:')
+    lower.includes('youtube.com/watch') ||
+    lower.includes('youtube.com/shorts') ||
+    lower.includes('youtu.be/') ||
+    lower.includes('vimeo.com/') ||
+    lower.includes('tiktok.com/')
+  ) {
+    return false
+  }
+  // Reject static images
+  if (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp') ||
+    lower.endsWith('.gif') ||
+    lower.includes('i.ytimg.com') ||
+    lower.includes('images.unsplash.com')
   ) {
     return false
   }
@@ -89,18 +97,32 @@ const isDirectVideo = (url?: string | null): boolean => {
     lower.includes('.mov') ||
     lower.includes('.m4v') ||
     lower.includes('.m3u8') ||
-    lower.includes('.ogv') ||
     lower.includes('blob:') ||
     lower.includes('commondatastorage.googleapis.com') ||
     lower.includes('storage.googleapis.com') ||
     lower.includes('/storage/v1/object/') ||
-    lower.includes('video') ||
     lower.includes('supabase.co/storage') ||
-    lower.startsWith('http')
+    lower.includes('googlevideo.com')
+  )
+}
+
+const isDirectImage = (url?: string | null): boolean => {
+  if (!url) return false
+  const lower = url.trim().toLowerCase()
+  return (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp') ||
+    lower.includes('images.unsplash.com') ||
+    lower.includes('i.ytimg.com') ||
+    lower.includes('ytimg.com') ||
+    lower.includes('unsplash')
   )
 }
 
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
+  const frame = useCurrentFrame()
   const { width, height, durationInFrames } = useVideoConfig()
 
   const cropConfig = config?.crop || { mode: 'smart', x: 0.5, y: 0.5, scale: 1 }
@@ -111,31 +133,86 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const startTime = Number(config?.startTime) || 0
   const startFrame = Math.max(0, Math.round(startTime * FPS))
 
-  const rawSourceVideo = config?.sourceVideo || ''
-  const isDirect = isDirectVideo(rawSourceVideo)
-  const sourceVideo = isDirect
-    ? rawSourceVideo
-    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
+  const rawSource = (config?.sourceVideo || '').trim()
+  const hasDirectVideo = isDirectVideo(rawSource)
+  const hasDirectImage = isDirectImage(rawSource)
+
+  // Primary video URL or high-speed resilient 10-minute HD sample stream
+  const sourceVideo = hasDirectVideo
+    ? rawSource
+    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+
+  // Subtle Ken Burns slow pan & zoom for imagery or motion backgrounds
+  const kenBurnsZoom = interpolate(frame, [0, Math.max(1, durationInFrames)], [1, 1.08], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  })
+
+  // Pulsing ambient background glow
+  const glowOpacity = interpolate(
+    Math.sin((frame / FPS) * Math.PI),
+    [-1, 1],
+    [0.2, 0.45],
+  )
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#07090E' }}>
-      {/* Base Video / Backdrop */}
-      <AbsoluteFill style={{ overflow: 'hidden' }}>
-        <Video
-          src={sourceVideo}
-          startFrom={startFrame}
-          endAt={startFrame + durationInFrames}
-          playbackRate={config.speed || 1}
-          volume={config.originalVolume ?? 1}
+      {/* 1. Underlying animated ambient glow so canvas is never dead black */}
+      <AbsoluteFill style={{ background: 'radial-gradient(ellipse at center, #1e1b4b 0%, #0c0a1f 60%, #030712 100%)' }}>
+        <div
           style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-            transform: `scale(${scale})`,
+            position: 'absolute',
+            inset: 0,
+            opacity: glowOpacity,
+            background: 'radial-gradient(circle at 50% 40%, rgba(99, 102, 241, 0.4) 0%, transparent 65%)',
           }}
         />
       </AbsoluteFill>
+
+      {/* 2. Video Player Layer */}
+      {hasDirectVideo || !hasDirectImage ? (
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Video
+            src={sourceVideo}
+            startFrom={hasDirectVideo ? startFrame : startFrame % 900}
+            endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 900) + durationInFrames}
+            playbackRate={config.speed || 1}
+            volume={config.originalVolume ?? 1}
+            crossOrigin="anonymous"
+            playsInline
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${scale})`,
+            }}
+          />
+        </AbsoluteFill>
+      ) : (
+        /* 3. High-Resolution Motion Photo Canvas with Ken Burns Zoom */
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Img
+            src={rawSource}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+              transform: `scale(${scale * kenBurnsZoom})`,
+              filter: 'brightness(0.88) contrast(1.08) saturate(1.15)',
+            }}
+          />
+          {/* Subtle cinematic top/bottom vignette overlay */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, transparent 35%, rgba(0,0,0,0.4) 70%, rgba(0,0,0,0.85) 100%)',
+            }}
+          />
+        </AbsoluteFill>
+      )}
 
       {/* B-Roll Segments */}
       {Array.isArray(config?.broll) &&
