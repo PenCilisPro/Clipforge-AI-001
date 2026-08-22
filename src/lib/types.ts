@@ -445,7 +445,12 @@ export function normalizeClipConfiguration(
     )
   }
 
-  if (isVideoExt(clip?.current_render_url)) {
+  // Older client-generated clips could store the original stream in
+  // current_render_url. Only a completed render is valid as the clip output.
+  if (
+    isVideoExt(clip?.current_render_url) &&
+    (clip?.status === 'RENDERED' || clip?.status === 'APPROVED')
+  ) {
     sourceVideo = clip!.current_render_url!.trim()
   } else if (isVideoExt(rawConfig?.sourceVideo)) {
     sourceVideo = rawConfig.sourceVideo.trim()

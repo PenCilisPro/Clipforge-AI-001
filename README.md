@@ -22,15 +22,28 @@ CLIP CONFIGURATION → REMOTION RENDERING → CAPTIONS → B-ROLL → MUSIC →
 
 ## Setup
 
-### 1. Web app
+### 1. Environment Variables
+
+Copy the example file and fill in the required values:
+
+```bash
+cp .env.example .env
+# Edit .env and add your actual keys:
+# - VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (for the web app)
+# - SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY, RAPIDAPI_KEY, YOUTUBE_API_KEY, etc.
+# For local development you can run:
+#   npm run setup:dev-env
+# to get a placeholder .env file, then replace the placeholder values with real keys.
+```
+
+### 2. Web app
 
 ```bash
 npm install
-cp .env.example .env   # fill in VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
 npm run dev
 ```
 
-### 2. Supabase
+### 3. Supabase
 
 ```bash
 supabase db push                 # applies supabase/migrations
@@ -45,7 +58,7 @@ supabase secrets set PEXELS_API_KEY=... JAMENDO_CLIENT_ID=... \
 Schedule `publish-post` and `sync-analytics` with Supabase cron for automatic
 publishing and analytics collection.
 
-### 3. Workers
+### 4. Workers
 
 Requires Node 22+, plus `yt-dlp`, `ffmpeg`, and `ffprobe` on PATH.
 

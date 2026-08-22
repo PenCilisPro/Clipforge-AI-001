@@ -239,6 +239,9 @@ export default function ClipStudio() {
   const [syncingTranscript, setSyncingTranscript] = useState(false)
 
   const [previewMode, setPreviewMode] = useState<'live' | 'rendered'>('live')
+  const hasRenderedPreview = Boolean(
+    clip?.current_render_url && (clip.status === 'RENDERED' || clip.status === 'APPROVED'),
+  )
 
   // Direct Browser Video Export / Render state
   const [showRenderModal, setShowRenderModal] = useState(false)
@@ -288,8 +291,13 @@ export default function ClipStudio() {
       setClip(loadedClip)
       setVersions(loadedVersions)
       setActiveJob(((jobsRes.data as RenderJob[]) ?? [])[0] ?? null)
-      if (loadedClip.current_render_url) {
+      if (
+        loadedClip.current_render_url &&
+        (loadedClip.status === 'RENDERED' || loadedClip.status === 'APPROVED')
+      ) {
         setPreviewMode('rendered')
+      } else {
+        setPreviewMode('live')
       }
       if (transcriptRes.data) {
         setTranscriptData(transcriptRes.data)
@@ -1036,7 +1044,7 @@ export default function ClipStudio() {
               <span>Remotion Preview</span>
             </div>
 
-            {clip.current_render_url && (
+            {hasRenderedPreview && (
               <div className="flex rounded-lg bg-surface-800 p-0.5 text-[11px]">
                 <button
                   type="button"
@@ -1067,7 +1075,7 @@ export default function ClipStudio() {
           </div>
 
           <div className="flex w-full flex-1 flex-col items-center justify-center">
-            {previewMode === 'live' || !clip.current_render_url ? (
+            {previewMode === 'live' || !hasRenderedPreview ? (
               <RemotionPlayerPreview
                 config={config}
                 onAddCaptions={() => void handleGenerateCaptions()}
@@ -1077,7 +1085,7 @@ export default function ClipStudio() {
             ) : (
               <video
                 key={clip.current_render_url}
-                src={clip.current_render_url}
+                src={clip.current_render_url ?? undefined}
                 controls
                 className="aspect-[9/16] w-full max-w-[280px] rounded-lg bg-black object-contain shadow-2xl"
               />

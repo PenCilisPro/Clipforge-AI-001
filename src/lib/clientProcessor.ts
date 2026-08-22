@@ -2,20 +2,23 @@ import { supabase } from './supabase'
 import type { Project, Pattern } from './types'
 import { resolveYoutubeStream } from './youtubeResolver'
 
-const getFallbackKey = () => {
-  try {
-    return atob('c2stb3ItdjEtNTExNWVmNDNhNjJhYjFiNjAxY2M1NTZmYjU3Y2RlZmVkMWQ5N2VhNTNlMmJlN2FkM2IxOGUwYzkzNjY1NGFiOQ==')
-  } catch {
-    return ''
-  }
-}
-
+// Require environment variables for API keys - no fallback defaults for security
 const OPENAI_API_KEY =
   (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_OPENROUTER_API_KEY || import.meta.env?.VITE_OPENAI_API_KEY)) ||
-  getFallbackKey()
+  ''
 const YOUTUBE_API_KEY =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_YOUTUBE_API_KEY) ||
-  'AIzaSyCk7-wwg9qC8Q2JsVwwGJFIGQ0pvh_GpMY'
+  ''
+
+// Validate required environment variables in non-production environments
+if (typeof import.meta !== 'undefined' && import.meta.env?.MODE !== 'production') {
+  if (!OPENAI_API_KEY) {
+    console.warn('⚠️ VITE_OPENAI_API_KEY or VITE_OPENROUTER_API_KEY not provided. AI features will be limited.')
+  }
+  if (!YOUTUBE_API_KEY) {
+    console.warn('⚠️ VITE_YOUTUBE_API_KEY not provided. YouTube metadata features will be limited.')
+  }
+}
 
 function extractYoutubeId(url: string): string | null {
   const match = url.match(
@@ -352,7 +355,10 @@ Return ONLY valid JSON matching this exact structure:
           matched_pattern_name: c.matchedPatternName || null,
           status: 'DETECTED',
           current_thumbnail_url: thumbnailUrl,
-          current_render_url: directStreamVideoUrl || null,
+          // The resolved stream is the source footage, not a rendered clip. Keeping it
+          // out of this field prevents the studio from presenting the full original as
+          // the final MP4 export.
+          current_render_url: null,
         })
         .select()
         .single()

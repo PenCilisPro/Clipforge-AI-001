@@ -25,31 +25,42 @@ import type {
 
 const execFileAsync = promisify(execFile)
 
-const DEFAULT_SUPABASE_URL = 'https://uenjzvbtwlawhpsybamnp.supabase.co'
-const DEFAULT_SERVICE_ROLE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVlbmp2YnR3bGF3aHBzeWJhbW5wIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjUyNDY4NiwiZXhwIjoyMTAyMTAwNjg2fQ.HzeC8LX0acpGSfOMsBP8KVsMrOqNfRj3jG6abzBgwGg'
-const DEFAULT_OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY ||
-  Buffer.from('c2stb3ItdjEtNTExNWVmNDNhNjJhYjFiNjAxY2M1NTZmYjU3Y2RlZmVkMWQ5N2VhNTNlMmJlN2FkM2IxOGUwYzkzNjY1NGFiOQ==', 'base64').toString('utf8')
-const DEFAULT_RAPIDAPI_KEY =
-  process.env.RAPIDAPI_KEY ||
-  'a3a4ab9b9bmsh25a10436c2edfc5p1b7021jsn8a7c6f7f0e54'
-const DEFAULT_RAPIDAPI_HOST =
-  process.env.RAPIDAPI_HOST || 'youtube-media-downloader.p.rapidapi.com'
-const DEFAULT_YOUTUBE_API_KEY =
-  process.env.YOUTUBE_API_KEY ||
-  'AIzaSyCk7-wwg9qC8Q2JsVwwGJFIGQ0pvh_GpMY'
-
-const SUPABASE_URL = process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || DEFAULT_SERVICE_ROLE_KEY
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || DEFAULT_OPENAI_API_KEY
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || DEFAULT_RAPIDAPI_KEY
-const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || DEFAULT_RAPIDAPI_HOST
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || DEFAULT_YOUTUBE_API_KEY
-
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.')
+// Required environment variables – no fallback defaults for security
+const SUPABASE_URL = process.env.SUPABASE_URL
+if (!SUPABASE_URL) {
+  console.error('Missing SUPABASE_URL.')
+  process.exit(1)
+}
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+if (!SERVICE_ROLE_KEY) {
+  console.error('Missing SUPABASE_SERVICE_ROLE_KEY.')
+  process.exit(1)
+}
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+if (!OPENAI_API_KEY) {
+  console.error('Missing OPENAI_API_KEY.')
+  process.exit(1)
+}
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY
+if (!RAPIDAPI_KEY) {
+  console.error('Missing RAPIDAPI_KEY.')
+  process.exit(1)
+}
+// RAPIDAPI_HOST has a safe fallback
+const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || 'youtube-media-downloader.p.rapidapi.com'
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY
+if (!YOUTUBE_API_KEY) {
+  console.error('Missing YOUTUBE_API_KEY.')
+  process.exit(1)
+}
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY
+if (!PEXELS_API_KEY) {
+  console.error('Missing PEXELS_API_KEY.')
+  process.exit(1)
+}
+const JAMENDO_CLIENT_ID = process.env.JAMENDO_CLIENT_ID
+if (!JAMENDO_CLIENT_ID) {
+  console.error('Missing JAMENDO_CLIENT_ID.')
   process.exit(1)
 }
 
