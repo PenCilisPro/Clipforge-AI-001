@@ -66,45 +66,9 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   )
 }
 
-const isDirectVideo = (url?: string | null): boolean => {
-  if (!url) return false
-  const lower = url.trim().toLowerCase()
-  // Reject web page URLs that cannot be played directly by HTML <video>
-  if (
-    lower.includes('youtube.com/watch') ||
-    lower.includes('youtube.com/shorts') ||
-    lower.includes('youtu.be/') ||
-    lower.includes('vimeo.com/') ||
-    lower.includes('tiktok.com/')
-  ) {
-    return false
-  }
-  // Reject static images
-  if (
-    lower.endsWith('.jpg') ||
-    lower.endsWith('.jpeg') ||
-    lower.endsWith('.png') ||
-    lower.endsWith('.webp') ||
-    lower.endsWith('.gif') ||
-    lower.includes('i.ytimg.com') ||
-    lower.includes('images.unsplash.com')
-  ) {
-    return false
-  }
-  return (
-    lower.includes('.mp4') ||
-    lower.includes('.webm') ||
-    lower.includes('.mov') ||
-    lower.includes('.m4v') ||
-    lower.includes('.m3u8') ||
-    lower.includes('blob:') ||
-    lower.includes('commondatastorage.googleapis.com') ||
-    lower.includes('storage.googleapis.com') ||
-    lower.includes('/storage/v1/object/') ||
-    lower.includes('supabase.co/storage') ||
-    lower.includes('googlevideo.com')
-  )
-}
+
+  
+
 
 const getResolvedThumbnail = (config: ClipConfiguration): string => {
   if (config.thumbnailUrl) return config.thumbnailUrl
