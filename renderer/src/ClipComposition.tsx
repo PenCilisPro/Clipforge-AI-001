@@ -107,49 +107,40 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const endFrame = Math.round(config.endTime * FPS)
   const durationInFrames = Math.max(30, endFrame - startFrame)
 
+  const rawSourceVideo = config.sourceVideo || ''
+  const isDirect = isDirectVideo(rawSourceVideo)
+  const sourceVideo = isDirect
+    ? rawSourceVideo
+    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
+
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
       {/* Primary Video / Backdrop */}
-      {isDirectVideo(config.sourceVideo) ? (
-        <AbsoluteFill style={{ overflow: 'hidden' }}>
-          <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
-            <OffthreadVideo
-              src={config.sourceVideo}
-              playbackRate={config.speed || 1}
-              volume={config.originalVolume ?? 1}
-              style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-                transform: `scale(${config.crop.scale})`,
-              }}
-            />
-          </Sequence>
-        </AbsoluteFill>
-      ) : (
-        <AbsoluteFill style={{ overflow: 'hidden' }}>
-          <Img
-            src={config.sourceVideo}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              filter: 'brightness(0.95)',
-              transform: `scale(${config.crop?.scale || 1})`,
-            }}
-          />
-        </AbsoluteFill>
-      )}
+      <AbsoluteFill style={{ overflow: 'hidden' }}>
+        <OffthreadVideo
+          src={sourceVideo}
+          startFrom={startFrame}
+          endAt={endFrame}
+          playbackRate={config.speed || 1}
+          volume={config.originalVolume ?? 1}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+            transform: `scale(${config.crop.scale})`,
+          }}
+        />
+      </AbsoluteFill>
 
-      {/* Standalone original audio stream if video has no embedded audio or source is image/audio-only */}
-      {config.originalAudioUrl && (!isDirectVideo(config.sourceVideo) || config.originalAudioUrl !== config.sourceVideo) && (
-        <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
-          <Audio
-            src={config.originalAudioUrl}
-            volume={isDirectVideo(config.sourceVideo) ? 0 : (config.originalVolume ?? 1)}
-          />
-        </Sequence>
+      {/* Standalone original audio stream if video has no embedded audio or source is audio-only */}
+      {config.originalAudioUrl && config.originalAudioUrl !== sourceVideo && (
+        <Audio
+          src={config.originalAudioUrl}
+          startFrom={startFrame}
+          endAt={endFrame}
+          volume={config.originalVolume ?? 1}
+        />
       )}
 
       {/* Synchronized AI voiceover audio narration */}

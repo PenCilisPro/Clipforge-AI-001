@@ -100,23 +100,7 @@ const isDirectVideo = (url?: string | null): boolean => {
   )
 }
 
-const isDirectImage = (url?: string | null): boolean => {
-  if (!url) return false
-  const lower = url.toLowerCase()
-  return (
-    lower.endsWith('.jpg') ||
-    lower.endsWith('.jpeg') ||
-    lower.endsWith('.png') ||
-    lower.endsWith('.webp') ||
-    lower.includes('images.unsplash.com') ||
-    lower.includes('i.ytimg.com') ||
-    lower.includes('ytimg') ||
-    lower.includes('placeholder')
-  )
-}
-
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
-  const frame = useCurrentFrame()
   const { width, height, durationInFrames } = useVideoConfig()
 
   const cropConfig = config?.crop || { mode: 'smart', x: 0.5, y: 0.5, scale: 1 }
@@ -127,87 +111,31 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const startTime = Number(config?.startTime) || 0
   const startFrame = Math.max(0, Math.round(startTime * FPS))
 
-  const sourceVideo = config?.sourceVideo || ''
-  const hasVideoSource = isDirectVideo(sourceVideo)
-  const hasImageSource = isDirectImage(sourceVideo)
-
-  // Gentle Ken Burns slow zoom for image backdrops
-  const imageZoom = interpolate(frame, [0, Math.max(1, durationInFrames)], [1, 1.12], {
-    extrapolateLeft: 'clamp',
-    extrapolateRight: 'clamp',
-  })
-
-  // Pulsing ambient glow for background
-  const glowOpacity = interpolate(
-    Math.sin((frame / FPS) * Math.PI),
-    [-1, 1],
-    [0.15, 0.35],
-  )
+  const rawSourceVideo = config?.sourceVideo || ''
+  const isDirect = isDirectVideo(rawSourceVideo)
+  const sourceVideo = isDirect
+    ? rawSourceVideo
+    : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#07090E' }}>
       {/* Base Video / Backdrop */}
-      {hasVideoSource ? (
-        <AbsoluteFill style={{ overflow: 'hidden' }}>
-          <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
-            <Video
-              src={sourceVideo}
-              playbackRate={config.speed || 1}
-              volume={config.originalVolume ?? 1}
-              style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-                transform: `scale(${scale})`,
-              }}
-            />
-          </Sequence>
-        </AbsoluteFill>
-      ) : hasImageSource ? (
-        <AbsoluteFill>
-          <Img
-            src={sourceVideo}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${scale * imageZoom})`,
-              filter: 'brightness(0.85) saturate(1.15)',
-            }}
-          />
-          {/* Subtle cinematic gradient vignette */}
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              background: 'linear-gradient(to bottom, rgba(0,0,0,0.4) 0%, transparent 35%, rgba(0,0,0,0.4) 70%, rgba(0,0,0,0.92) 100%)',
-            }}
-          />
-        </AbsoluteFill>
-      ) : (
-        /* Fallback rich creator studio motion backdrop */
-        <AbsoluteFill style={{ background: 'radial-gradient(ellipse at center, #1e1b4b 0%, #0c0a1f 60%, #030712 100%)' }}>
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              opacity: glowOpacity,
-              background: 'radial-gradient(circle at 50% 40%, rgba(99, 102, 241, 0.45) 0%, transparent 60%)',
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              opacity: 0.1,
-              backgroundImage: 'radial-gradient(#818cf8 1.5px, transparent 1.5px)',
-              backgroundSize: '40px 40px',
-            }}
-          />
-        </AbsoluteFill>
-      )}
+      <AbsoluteFill style={{ overflow: 'hidden' }}>
+        <Video
+          src={sourceVideo}
+          startFrom={startFrame}
+          endAt={startFrame + durationInFrames}
+          playbackRate={config.speed || 1}
+          volume={config.originalVolume ?? 1}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+            transform: `scale(${scale})`,
+          }}
+        />
+      </AbsoluteFill>
 
       {/* B-Roll Segments */}
       {Array.isArray(config?.broll) &&
@@ -308,14 +236,14 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
         </div>
       )}
 
-      {/* Standalone original audio stream if video has no embedded audio or source is image/audio-only */}
-      {config?.originalAudioUrl && (!hasVideoSource || config.originalAudioUrl !== sourceVideo) && (
-        <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
-          <Audio
-            src={config.originalAudioUrl}
-            volume={hasVideoSource ? 0 : (config.originalVolume ?? 1)}
-          />
-        </Sequence>
+      {/* Standalone original audio stream if video has no embedded audio or source is audio-only */}
+      {config?.originalAudioUrl && config.originalAudioUrl !== sourceVideo && (
+        <Audio
+          src={config.originalAudioUrl}
+          startFrom={startFrame}
+          endAt={startFrame + durationInFrames}
+          volume={config.originalVolume ?? 1}
+        />
       )}
 
       {/* Voice Narration Audio Track */}

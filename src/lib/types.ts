@@ -409,22 +409,27 @@ export function normalizeClipConfiguration(
     ? rawConfig.endTime
     : (clip?.end_time ?? (startTime + 30))
 
-  // Determine the best source video / background
+  // Determine the best source video / background (MUST be a playable video format, never a static image thumbnail)
   let sourceVideo = ''
-  if (typeof rawConfig?.sourceVideo === 'string' && rawConfig.sourceVideo.trim()) {
+  const isVideoExt = (url?: string | null) => {
+    if (!url) return false
+    const l = url.trim().toLowerCase()
+    if (l.endsWith('.jpg') || l.endsWith('.jpeg') || l.endsWith('.png') || l.endsWith('.webp') || l.includes('i.ytimg.com') || l.includes('images.unsplash.com')) {
+      return false
+    }
+    return l.includes('.mp4') || l.includes('.webm') || l.includes('.mov') || l.includes('blob:') || l.includes('commondatastorage.googleapis.com') || l.includes('storage.googleapis.com') || l.includes('supabase.co/storage')
+  }
+
+  if (isVideoExt(rawConfig?.sourceVideo)) {
     sourceVideo = rawConfig.sourceVideo.trim()
-  } else if (context?.storagePath && context.storagePath.trim()) {
-    sourceVideo = context.storagePath.trim()
-  } else if (context?.sourceUrl && (context.sourceUrl.endsWith('.mp4') || context.sourceUrl.endsWith('.webm') || context.sourceUrl.includes('blob:'))) {
-    sourceVideo = context.sourceUrl.trim()
-  } else if (clip?.current_render_url) {
-    sourceVideo = clip.current_render_url
-  } else if (clip?.current_thumbnail_url && (clip.current_thumbnail_url.endsWith('.mp4') || clip.current_thumbnail_url.endsWith('.webm'))) {
-    sourceVideo = clip.current_thumbnail_url
-  } else if (context?.thumbnailUrl && (context.thumbnailUrl.endsWith('.mp4') || context.thumbnailUrl.endsWith('.webm'))) {
-    sourceVideo = context.thumbnailUrl
-  } else if (clip?.current_thumbnail_url) {
-    sourceVideo = clip.current_thumbnail_url
+  } else if (isVideoExt(context?.storagePath)) {
+    sourceVideo = context!.storagePath!.trim()
+  } else if (isVideoExt(context?.sourceUrl)) {
+    sourceVideo = context!.sourceUrl!.trim()
+  } else if (isVideoExt(clip?.current_render_url)) {
+    sourceVideo = clip!.current_render_url!
+  } else if (isVideoExt(clip?.current_thumbnail_url)) {
+    sourceVideo = clip!.current_thumbnail_url!
   } else {
     sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4'
   }
