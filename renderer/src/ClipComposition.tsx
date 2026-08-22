@@ -105,26 +105,27 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
   const startFrame = Math.round(config.startTime * FPS)
   const endFrame = Math.round(config.endTime * FPS)
+  const durationInFrames = Math.max(30, endFrame - startFrame)
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
       {/* Primary Video / Backdrop */}
       {isDirectVideo(config.sourceVideo) ? (
-        <AbsoluteFill>
-          <OffthreadVideo
-            src={config.sourceVideo}
-            startFrom={startFrame}
-            endAt={endFrame}
-            playbackRate={config.speed || 1}
-            volume={config.originalVolume ?? 1}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${config.crop.scale})`,
-            }}
-          />
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
+            <OffthreadVideo
+              src={config.sourceVideo}
+              playbackRate={config.speed || 1}
+              volume={config.originalVolume ?? 1}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+                transform: `scale(${config.crop.scale})`,
+              }}
+            />
+          </Sequence>
         </AbsoluteFill>
       ) : (
         <AbsoluteFill style={{ overflow: 'hidden' }}>
@@ -143,11 +144,12 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
       {/* Standalone original audio stream if video has no embedded audio or source is image/audio-only */}
       {config.originalAudioUrl && (!isDirectVideo(config.sourceVideo) || config.originalAudioUrl !== config.sourceVideo) && (
-        <Audio
-          src={config.originalAudioUrl}
-          startFrom={startFrame}
-          volume={isDirectVideo(config.sourceVideo) ? 0 : (config.originalVolume ?? 1)}
-        />
+        <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
+          <Audio
+            src={config.originalAudioUrl}
+            volume={isDirectVideo(config.sourceVideo) ? 0 : (config.originalVolume ?? 1)}
+          />
+        </Sequence>
       )}
 
       {/* Synchronized AI voiceover audio narration */}

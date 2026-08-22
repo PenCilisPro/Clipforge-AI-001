@@ -125,9 +125,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const scale = cropConfig.scale ?? 1
 
   const startTime = Number(config?.startTime) || 0
-  const endTime = Number(config?.endTime) || (startTime + 30)
   const startFrame = Math.max(0, Math.round(startTime * FPS))
-  const endFrame = Math.max(startFrame + 30, Math.round(endTime * FPS))
 
   const sourceVideo = config?.sourceVideo || ''
   const hasVideoSource = isDirectVideo(sourceVideo)
@@ -150,21 +148,21 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
     <AbsoluteFill style={{ backgroundColor: '#07090E' }}>
       {/* Base Video / Backdrop */}
       {hasVideoSource ? (
-        <AbsoluteFill>
-          <Video
-            src={sourceVideo}
-            startFrom={startFrame}
-            endAt={endFrame}
-            playbackRate={config.speed || 1}
-            volume={config.originalVolume ?? 1}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${scale})`,
-            }}
-          />
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
+            <Video
+              src={sourceVideo}
+              playbackRate={config.speed || 1}
+              volume={config.originalVolume ?? 1}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+                transform: `scale(${scale})`,
+              }}
+            />
+          </Sequence>
         </AbsoluteFill>
       ) : hasImageSource ? (
         <AbsoluteFill>
@@ -312,11 +310,12 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
       {/* Standalone original audio stream if video has no embedded audio or source is image/audio-only */}
       {config?.originalAudioUrl && (!hasVideoSource || config.originalAudioUrl !== sourceVideo) && (
-        <Audio
-          src={config.originalAudioUrl}
-          startFrom={startFrame}
-          volume={hasVideoSource ? 0 : (config.originalVolume ?? 1)}
-        />
+        <Sequence from={-startFrame} durationInFrames={startFrame + durationInFrames}>
+          <Audio
+            src={config.originalAudioUrl}
+            volume={hasVideoSource ? 0 : (config.originalVolume ?? 1)}
+          />
+        </Sequence>
       )}
 
       {/* Voice Narration Audio Track */}
