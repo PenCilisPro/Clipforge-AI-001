@@ -15,27 +15,50 @@ import { FPS, type ClipConfiguration } from './types'
 const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   const frame = useCurrentFrame()
   const { durationInFrames } = useVideoConfig()
-  const music = config.music
-  if (!music) return null
+  const music = config?.music
+  if (!music || !music.audioUrl) return null
 
-  const fadeInFrames = music.fadeIn * FPS
-  const fadeOutFrames = music.fadeOut * FPS
-  const volume =
-    music.volume *
-    interpolate(frame, [0, fadeInFrames], [0, 1], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    }) *
-    interpolate(frame, [durationInFrames - fadeOutFrames, durationInFrames], [1, 0], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    })
+  const baseVolume = typeof music.volume === 'number' ? music.volume : 0.35
+  if (baseVolume <= 0) return null
+
+  const fadeInFrames = Math.max(0, (music.fadeIn || 0) * FPS)
+  const fadeOutFrames = Math.max(0, (music.fadeOut || 0) * FPS)
+
+  const isVoiceActive = Boolean(config.voiceUrl) || config.voiceover?.enabled === true
+  const isDucking = isVoiceActive && config.voiceover?.duckMusic !== false
+  const duckMultiplier = isDucking ? 0.65 : 1.0
+
+  const fadeInMultiplier =
+    fadeInFrames > 0
+      ? interpolate(frame, [0, Math.max(1, fadeInFrames)], [0, 1], {
+          extrapolateLeft: 'clamp',
+          extrapolateRight: 'clamp',
+        })
+      : 1
+
+  const fadeOutMultiplier =
+    fadeOutFrames > 0 && durationInFrames > fadeOutFrames
+      ? interpolate(
+          frame,
+          [Math.max(0, durationInFrames - fadeOutFrames), durationInFrames],
+          [1, 0],
+          {
+            extrapolateLeft: 'clamp',
+            extrapolateRight: 'clamp',
+          },
+        )
+      : 1
+
+  const calculatedVolume = Math.max(
+    0,
+    Math.min(1.5, baseVolume * duckMultiplier * fadeInMultiplier * fadeOutMultiplier),
+  )
 
   return (
     <Audio
       src={music.audioUrl}
-      volume={volume}
-      startFrom={Math.round(music.trimStart * FPS)}
+      volume={calculatedVolume}
+      startFrom={Math.round((music.trimStart || 0) * FPS)}
     />
   )
 }

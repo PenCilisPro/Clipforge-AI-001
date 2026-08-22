@@ -27,7 +27,11 @@ import {
   VolumeX,
   Upload,
   Square,
+  Download,
+  X,
+  CheckCircle,
 } from 'lucide-react'
+import { renderClipInBrowser, type RenderProgress } from '@/lib/clientVideoRenderer'
 import { supabase, invokeFunction } from '@/lib/supabase'
 import type {
   BrollConfigItem,
@@ -235,6 +239,12 @@ export default function ClipStudio() {
   const [syncingTranscript, setSyncingTranscript] = useState(false)
 
   const [previewMode, setPreviewMode] = useState<'live' | 'rendered'>('live')
+
+  // Direct Browser Video Export / Render state
+  const [showRenderModal, setShowRenderModal] = useState(false)
+  const [clientRendering, setClientRendering] = useState(false)
+  const [clientProgress, setClientProgress] = useState<RenderProgress | null>(null)
+  const [renderedDownloadUrl, setRenderedDownloadUrl] = useState<string | null>(null)
 
   const showNotification = (msg: string) => {
     setActiveNotification(msg)
@@ -487,6 +497,28 @@ export default function ClipStudio() {
     showNotification('Re-distributed caption words evenly across clip!')
   }
 
+  // Direct in-browser video renderer with full composition
+  async function handleStartBrowserRender() {
+    if (!clip || !config) return
+    setClientRendering(true)
+    setClientProgress({ stage: 'Starting video renderer…', progress: 0 })
+    setError(null)
+    try {
+      // Save configuration first
+      await handleSave()
+      const { downloadUrl } = await renderClipInBrowser({
+        config,
+        onProgress: (p) => setClientProgress(p),
+      })
+      setRenderedDownloadUrl(downloadUrl)
+      showNotification('Video render complete! Ready to download.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'In-browser render failed.')
+    } finally {
+      setClientRendering(false)
+    }
+  }
+
   // Generate captions using OpenAI Whisper or AI Timing Engine
   async function handleGenerateCaptions() {
     if (!clip || !config) return
@@ -497,6 +529,9 @@ export default function ClipStudio() {
         clip,
         transcriptSegments: transcriptData?.segments,
         customApiKey: openAiKey,
+        sourceMediaUrl: config.sourceVideo || undefined,
+        startTime: config.startTime ?? clip.start_time,
+        endTime: config.endTime ?? clip.end_time,
       })
 
       if (words.length > 0) {
@@ -508,7 +543,7 @@ export default function ClipStudio() {
           },
         })
         setCaptionsSubTab('words')
-        showNotification(`Generated ${words.length} synchronized caption words!`)
+        showNotification(`Generated ${words.length} synchronized caption words for this clip!`)
       } else {
         setError('No words could be transcribed. Please check input.')
       }
@@ -938,16 +973,16 @@ export default function ClipStudio() {
             Save
           </button>
           <button
-            onClick={() => void handleRender()}
-            disabled={rendering || Boolean(activeJob)}
-            className="btn-primary"
+            onClick={() => setShowRenderModal(true)}
+            disabled={rendering || Boolean(activeJob) || clientRendering}
+            className="btn-primary flex items-center gap-1.5"
           >
-            {rendering || activeJob ? (
+            {rendering || activeJob || clientRendering ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Clapperboard className="h-4 w-4" />
             )}
-            Render MP4
+            Render & Export
           </button>
         </div>
       </div>
@@ -1023,7 +1058,12 @@ export default function ClipStudio() {
 
           <div className="flex w-full flex-1 flex-col items-center justify-center">
             {previewMode === 'live' || !clip.current_render_url ? (
-              <RemotionPlayerPreview config={config} />
+              <RemotionPlayerPreview
+                config={config}
+                onAddCaptions={() => void handleGenerateCaptions()}
+                isGeneratingCaptions={generatingCaptions || syncingTranscript}
+                onUpdateConfig={update}
+              />
             ) : (
               <video
                 key={clip.current_render_url}
@@ -2735,7 +2775,7 @@ export default function ClipStudio() {
                               update({
                                 music: {
                                   audioUrl: m.audioUrl,
-                                  volume: config.music?.volume ?? 0.12,
+                                  volume: config.music?.volume ?? 0.35,
                                   fadeIn: 1,
                                   fadeOut: 1,
                                   trimStart: 0,
@@ -2762,6 +2802,143 @@ export default function ClipStudio() {
           </div>
         </div>
       </div>
+
+      {/* RENDER & EXPORT MODAL */}
+      {showRenderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="card w-full max-w-lg overflow-hidden border-surface-700 bg-surface-900 shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Clapperboard className="h-5 w-5 text-brand-400" />
+                  Render & Export Video
+                </h3>
+                <p className="mt-0.5 text-xs text-zinc-400">
+                  Export your 9:16 vertical reel with synchronized typography, audio mix, and Jamendo soundtrack.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRenderModal(false)}
+                className="rounded-lg p-1 text-zinc-400 hover:bg-surface-800 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Progress indicator during browser render */}
+            {clientRendering && clientProgress && (
+              <div className="rounded-xl border border-brand-500/40 bg-brand-500/10 p-4 space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-brand-300 flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {clientProgress.stage}
+                  </span>
+                  <span className="font-mono font-bold text-brand-400">{clientProgress.progress}%</span>
+                </div>
+                <ProgressBar value={clientProgress.progress} />
+                {clientProgress.currentFrame && clientProgress.totalFrames && (
+                  <p className="text-[11px] text-zinc-400 font-mono text-right">
+                    Frame {clientProgress.currentFrame} of {clientProgress.totalFrames} (30 FPS)
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Finished Download Button if ready */}
+            {renderedDownloadUrl && !clientRendering && (
+              <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-emerald-300">
+                  <CheckCircle className="h-5 w-5 text-emerald-400" />
+                  <div>
+                    <h4 className="text-xs font-bold">Render Finished Successfully!</h4>
+                    <p className="text-[11px] text-zinc-300">Your video is compiled and ready for download.</p>
+                  </div>
+                </div>
+                <a
+                  href={renderedDownloadUrl}
+                  download={`${clip.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_remotion.webm`}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg hover:bg-emerald-500 transition-all"
+                >
+                  <Download className="h-4 w-4" /> Download Video File (.webm / .mp4)
+                </a>
+              </div>
+            )}
+
+            {/* Export Method Selection Cards */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {/* Method 1: Instant In-Browser Direct Render */}
+              <div className="flex flex-col justify-between rounded-xl border border-surface-700 bg-surface-850 p-4 hover:border-brand-500/60 transition-colors space-y-3">
+                <div>
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-brand-400">
+                    <Sparkles className="h-4 w-4" /> Instant Browser Export
+                  </div>
+                  <p className="mt-1 text-[11px] text-zinc-400">
+                    Renders immediately in your browser tab using Web Audio + Canvas. Fast, reliable, and downloadable right away.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleStartBrowserRender()}
+                  disabled={clientRendering}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-brand-500 px-3 py-2 text-xs font-bold text-white hover:bg-brand-400 disabled:opacity-50 transition-all shadow-md"
+                >
+                  {clientRendering ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Rendering...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-3.5 w-3.5" /> Start Instant Export
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Method 2: Cloud Server Remotion Pipeline */}
+              <div className="flex flex-col justify-between rounded-xl border border-surface-700 bg-surface-850 p-4 hover:border-purple-500/60 transition-colors space-y-3">
+                <div>
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-purple-400">
+                    <Film className="h-4 w-4" /> Cloud Remotion Worker
+                  </div>
+                  <p className="mt-1 text-[11px] text-zinc-400">
+                    Queues the clip in the backend Remotion rendering pipeline for server-side MP4 generation with Supabase.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRenderModal(false)
+                    void handleRender()
+                  }}
+                  disabled={rendering || Boolean(activeJob)}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-surface-750 px-3 py-2 text-xs font-bold text-zinc-200 hover:bg-surface-700 hover:text-white border border-surface-600 disabled:opacity-50 transition-all"
+                >
+                  {rendering ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Queuing...
+                    </>
+                  ) : (
+                    <>
+                      <Clapperboard className="h-3.5 w-3.5" /> Queue Cloud Render
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRenderModal(false)}
+                className="btn-secondary text-xs"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

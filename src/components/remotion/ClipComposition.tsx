@@ -17,37 +17,50 @@ const FPS = 30
 const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   const frame = useCurrentFrame()
   const { durationInFrames } = useVideoConfig()
-  const music = config.music
+  const music = config?.music
   if (!music || !music.audioUrl) return null
 
-  const fadeInFrames = (music.fadeIn || 0) * FPS
-  const fadeOutFrames = (music.fadeOut || 0) * FPS
-  
-  // Smart Audio Ducking: If voiceover or voice is active, reduce music volume to 15-20%
-  const isDucking = config.voiceover?.duckMusic !== false
-  const duckMultiplier = isDucking ? 0.35 : 1.0
+  const baseVolume = typeof music.volume === 'number' ? music.volume : 0.35
+  if (baseVolume <= 0) return null
 
-  const volume =
-    (music.volume ?? 0.3) *
-    duckMultiplier *
-    interpolate(frame, [0, Math.max(1, fadeInFrames)], [0, 1], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    }) *
-    interpolate(
-      frame,
-      [Math.max(0, durationInFrames - fadeOutFrames), durationInFrames],
-      [1, 0],
-      {
-        extrapolateLeft: 'clamp',
-        extrapolateRight: 'clamp',
-      },
-    )
+  const fadeInFrames = Math.max(0, (music.fadeIn || 0) * FPS)
+  const fadeOutFrames = Math.max(0, (music.fadeOut || 0) * FPS)
+  
+  // Smart Audio Ducking: ONLY duck if AI voiceover or voice narration is ACTUALLY active and enabled!
+  const isVoiceActive = Boolean(config.voiceUrl) || config.voiceover?.enabled === true
+  const isDucking = isVoiceActive && config.voiceover?.duckMusic !== false
+  const duckMultiplier = isDucking ? 0.65 : 1.0
+
+  const fadeInMultiplier =
+    fadeInFrames > 0
+      ? interpolate(frame, [0, Math.max(1, fadeInFrames)], [0, 1], {
+          extrapolateLeft: 'clamp',
+          extrapolateRight: 'clamp',
+        })
+      : 1
+
+  const fadeOutMultiplier =
+    fadeOutFrames > 0 && durationInFrames > fadeOutFrames
+      ? interpolate(
+          frame,
+          [Math.max(0, durationInFrames - fadeOutFrames), durationInFrames],
+          [1, 0],
+          {
+            extrapolateLeft: 'clamp',
+            extrapolateRight: 'clamp',
+          },
+        )
+      : 1
+
+  const calculatedVolume = Math.max(
+    0,
+    Math.min(1.5, baseVolume * duckMultiplier * fadeInMultiplier * fadeOutMultiplier),
+  )
 
   return (
     <Audio
       src={music.audioUrl}
-      volume={volume}
+      volume={calculatedVolume}
       startFrom={Math.round((music.trimStart || 0) * FPS)}
     />
   )

@@ -11,17 +11,26 @@ import {
   Play,
   Square,
   Volume1,
+  Music,
+  Type,
+  Loader2,
 } from 'lucide-react'
 
 interface RemotionPlayerPreviewProps {
   config: ClipConfiguration
   className?: string
   autoPlayVoice?: boolean
+  onAddCaptions?: () => void
+  isGeneratingCaptions?: boolean
+  onUpdateConfig?: (partial: Partial<ClipConfiguration>) => void
 }
 
 export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
   config,
   className = '',
+  onAddCaptions,
+  isGeneratingCaptions = false,
+  onUpdateConfig,
 }) => {
   const playerRef = useRef<PlayerRef>(null)
   const [isSpeaking, setIsSpeaking] = useState(false)
@@ -29,6 +38,8 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
   const [isOriginalMuted, setIsOriginalMuted] = useState(false)
   const [voiceVolume, setVoiceVolume] = useState<number>(config.voiceover?.volume ?? config.voiceVolume ?? 1)
   const [isVoiceMuted, setIsVoiceMuted] = useState(false)
+  const [musicVolume, setMusicVolume] = useState<number>(config.music?.volume ?? 0.35)
+  const [isMusicMuted, setIsMusicMuted] = useState(false)
 
   // Keep state in sync if parent config changes
   useEffect(() => {
@@ -40,7 +51,10 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
     } else if (typeof config.voiceVolume === 'number') {
       setVoiceVolume(config.voiceVolume)
     }
-  }, [config.originalVolume, config.voiceover?.volume, config.voiceVolume])
+    if (typeof config.music?.volume === 'number') {
+      setMusicVolume(config.music.volume)
+    }
+  }, [config.originalVolume, config.voiceover?.volume, config.voiceVolume, config.music?.volume])
 
   const startTime = Number(config?.startTime) || 0
   const endTime = Number(config?.endTime) || (startTime + 30)
@@ -140,6 +154,12 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
                     volume: isVoiceMuted ? 0 : voiceVolume,
                   }
                 : undefined,
+              music: config.music
+                ? {
+                    ...config.music,
+                    volume: isMusicMuted ? 0 : musicVolume,
+                  }
+                : null,
             },
           }}
           durationInFrames={durationInFrames}
@@ -160,8 +180,16 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
         {/* Live Remotion Badge */}
         <div className="pointer-events-none absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-full bg-surface-900/85 px-2.5 py-1 text-[10px] font-semibold text-brand-400 backdrop-blur-md border border-surface-700/50">
           <Sparkles className="h-3 w-3 animate-pulse" />
-          Live Remotion Preview
+          Live Preview
         </div>
+
+        {/* Active Music Badge */}
+        {config.music?.audioUrl && (
+          <div className="pointer-events-none absolute top-11 left-3 z-10 flex items-center gap-1.5 rounded-full bg-surface-900/85 px-2 py-0.5 text-[9px] font-medium text-brand-300 backdrop-blur-md border border-brand-500/30">
+            <Music className="h-2.5 w-2.5 text-brand-400" />
+            <span className="truncate max-w-[120px]">{config.music.title || 'Soundtrack'}</span>
+          </div>
+        )}
 
         {/* Active Voice Indicator Pill */}
         {config.voiceover?.enabled !== false && (
@@ -172,15 +200,44 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
         )}
       </div>
 
-      {/* Dual Audio Track Controls: Original Clip Audio + AI Voiceover */}
-      <div className="mt-3 flex w-full max-w-[300px] flex-col gap-2.5 rounded-xl bg-surface-850 p-3 border border-surface-700/70 shadow-sm text-xs">
+      {/* Quick Add Captions Bar on Preview (Step 2 of Workflow) */}
+      {onAddCaptions && (
+        <div className="mt-2.5 w-full max-w-[300px]">
+          <button
+            type="button"
+            onClick={onAddCaptions}
+            disabled={isGeneratingCaptions}
+            className="w-full flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 px-3 py-2 text-xs font-semibold text-white shadow-md hover:from-brand-500 hover:to-indigo-500 transition-all disabled:opacity-50"
+            title="Generate AI Whisper captions based on the current clip timestamps"
+          >
+            {isGeneratingCaptions ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>Generating Whisper Captions...</span>
+              </>
+            ) : (
+              <>
+                <Type className="h-3.5 w-3.5" />
+                <span>{config.captions?.words?.length ? '✨ Regenerate Captions for this Clip' : '✨ Add Captions'}</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Audio Mixer Controls: Original Clip Audio + Background Music + AI Voiceover */}
+      <div className="mt-2.5 flex w-full max-w-[300px] flex-col gap-2.5 rounded-xl bg-surface-850 p-3 border border-surface-700/70 shadow-sm text-xs">
         {/* Track 1: Original Clip Audio */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setIsOriginalMuted(!isOriginalMuted)}
+                onClick={() => {
+                  const newMuted = !isOriginalMuted
+                  setIsOriginalMuted(newMuted)
+                  onUpdateConfig?.({ originalVolume: newMuted ? 0 : originalVolume })
+                }}
                 className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-surface-750 hover:text-white"
                 title={isOriginalMuted ? 'Unmute Original Clip Audio' : 'Mute Original Clip Audio'}
               >
@@ -192,7 +249,7 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
                   <Volume1 className="h-3.5 w-3.5 text-zinc-300" />
                 )}
               </button>
-              <span className="text-[11px] font-semibold text-zinc-200">Original Clip Audio</span>
+              <span className="text-[11px] font-semibold text-zinc-200">Original Audio</span>
             </div>
             <div className="flex items-center gap-1">
               <button
@@ -200,6 +257,7 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
                 onClick={() => {
                   setOriginalVolume(1.0)
                   setIsOriginalMuted(false)
+                  onUpdateConfig?.({ originalVolume: 1.0 })
                 }}
                 className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300 hover:bg-surface-700"
               >
@@ -210,6 +268,7 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
                 onClick={() => {
                   setOriginalVolume(1.5)
                   setIsOriginalMuted(false)
+                  onUpdateConfig?.({ originalVolume: 1.5 })
                 }}
                 className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-medium text-brand-300 hover:bg-brand-500/30"
               >
@@ -230,12 +289,93 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
               const val = Number(e.target.value)
               setOriginalVolume(val)
               if (isOriginalMuted && val > 0) setIsOriginalMuted(false)
+              onUpdateConfig?.({ originalVolume: val })
             }}
             className="h-1.5 w-full cursor-pointer rounded-lg accent-brand-500"
           />
         </div>
 
-        {/* Track 2: AI Voiceover Narration */}
+        {/* Track 2: Background Music (Jamendo / Custom) */}
+        {config.music?.audioUrl && (
+          <div className="space-y-1.5 pt-2 border-t border-surface-750/70">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newMuted = !isMusicMuted
+                    setIsMusicMuted(newMuted)
+                    if (config.music) {
+                      onUpdateConfig?.({
+                        music: { ...config.music, volume: newMuted ? 0 : musicVolume },
+                      })
+                    }
+                  }}
+                  className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-surface-750 hover:text-white"
+                  title={isMusicMuted ? 'Unmute Soundtrack' : 'Mute Soundtrack'}
+                >
+                  {isMusicMuted || musicVolume === 0 ? (
+                    <VolumeX className="h-3.5 w-3.5 text-red-400" />
+                  ) : (
+                    <Music className="h-3.5 w-3.5 text-brand-400" />
+                  )}
+                </button>
+                <span className="text-[11px] font-semibold text-brand-300 truncate max-w-[120px]">
+                  {config.music.title || 'Soundtrack'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMusicVolume(0.35)
+                    setIsMusicMuted(false)
+                    if (config.music) {
+                      onUpdateConfig?.({ music: { ...config.music, volume: 0.35 } })
+                    }
+                  }}
+                  className="rounded bg-surface-750 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300 hover:bg-surface-700"
+                >
+                  35%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMusicVolume(0.7)
+                    setIsMusicMuted(false)
+                    if (config.music) {
+                      onUpdateConfig?.({ music: { ...config.music, volume: 0.7 } })
+                    }
+                  }}
+                  className="rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-medium text-brand-300 hover:bg-brand-500/30"
+                >
+                  70%
+                </button>
+                <span className="font-mono text-[10px] text-brand-400 w-9 text-right font-medium">
+                  {isMusicMuted ? 'MUTED' : `${Math.round(musicVolume * 100)}%`}
+                </span>
+              </div>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1.0}
+              step={0.02}
+              value={isMusicMuted ? 0 : musicVolume}
+              onChange={(e) => {
+                const val = Number(e.target.value)
+                setMusicVolume(val)
+                if (isMusicMuted && val > 0) setIsMusicMuted(false)
+                if (config.music) {
+                  onUpdateConfig?.({ music: { ...config.music, volume: val } })
+                }
+              }}
+              className="h-1.5 w-full cursor-pointer rounded-lg accent-brand-500"
+            />
+          </div>
+        )}
+
+        {/* Track 3: AI Voiceover Narration */}
         {config.voiceover?.enabled !== false && (
           <div className="space-y-1.5 pt-2 border-t border-surface-750/70">
             <div className="flex items-center justify-between">

@@ -1,4 +1,5 @@
 import type { Clip, CaptionWordConfig, BrollConfigItem } from './types'
+import { sliceAudioFromUrl } from './audioSlicer'
 
 // Curated list of high-converting creator fonts for TikTok, Reels, and Shorts
 export interface CreatorFontOption {
@@ -202,29 +203,38 @@ export function realignWordsEvenly(words: CaptionWordConfig[], clipDuration: num
 
 /**
  * Generate synchronized word-level captions for a clip interval.
- * Supports OpenAI Whisper verbose_json API, NVIDIA NIM Whisper API, or AI Semantic Speech Timing Engine.
+ * Supports OpenAI Whisper verbose_json API with direct audio slicing, NVIDIA NIM Whisper API,
+ * transcript segment alignment, or AI Semantic Speech Timing Engine.
  */
 export async function generateWhisperCaptions({
   clip,
   transcriptSegments,
   customApiKey,
   whisperAudioFile,
+  sourceMediaUrl,
+  startTime,
+  endTime,
   language = 'en',
 }: {
   clip: Clip
   transcriptSegments?: Array<{ start: number; end: number; text: string }>
   customApiKey?: string
   whisperAudioFile?: File
+  sourceMediaUrl?: string
+  startTime?: number
+  endTime?: number
   language?: string
 }): Promise<CaptionWordConfig[]> {
-  const clipDuration = Math.max(3, clip.duration || clip.end_time - clip.start_time || 30)
+  const clipStart = typeof startTime === 'number' ? startTime : clip.start_time
+  const clipEnd = typeof endTime === 'number' ? endTime : (clip.end_time || clipStart + 30)
+  const clipDuration = Math.max(2, clipEnd - clipStart)
 
   // 0. If transcript segments were provided from project processing, extract real speech first!
   if (transcriptSegments && transcriptSegments.length > 0) {
     const extracted = extractWordsFromTranscriptSegments(
       transcriptSegments,
-      clip.start_time,
-      clip.end_time || clip.start_time + clipDuration,
+      clipStart,
+      clipEnd,
     )
     if (extracted.length > 0) {
       return extracted
@@ -238,8 +248,21 @@ export async function generateWhisperCaptions({
       (import.meta.env?.VITE_OPENAI_API_KEY || import.meta.env?.VITE_OPENROUTER_API_KEY)) ||
     USER_NVIDIA_KEY
 
-  // 1. If an actual audio file was passed, call official OpenAI or NVIDIA NIM Whisper endpoint
-  if (whisperAudioFile) {
+  // 1. If no pre-sliced audio file was provided, try slicing the exact time slice from source media
+  let audioFileToTranscribe = whisperAudioFile
+  if (!audioFileToTranscribe && sourceMediaUrl && (sourceMediaUrl.startsWith('http') || sourceMediaUrl.startsWith('blob:'))) {
+    try {
+      const slicedFile = await sliceAudioFromUrl(sourceMediaUrl, clipStart, clipDuration)
+      if (slicedFile) {
+        audioFileToTranscribe = slicedFile
+      }
+    } catch (e) {
+      console.warn('Could not slice audio from source URL:', e)
+    }
+  }
+
+  // 2. If an audio file slice is available, call official OpenAI or NVIDIA NIM Whisper endpoint
+  if (audioFileToTranscribe) {
     try {
       const isNvidia = apiKey.startsWith('nvapi-')
       const endpoint = isNvidia
@@ -248,7 +271,7 @@ export async function generateWhisperCaptions({
       const model = isNvidia ? 'openai/whisper-large-v3-turbo' : 'whisper-1'
 
       const formData = new FormData()
-      formData.append('file', whisperAudioFile)
+      formData.append('file', audioFileToTranscribe)
       formData.append('model', model)
       formData.append('response_format', 'verbose_json')
       formData.append('timestamp_granularities[]', 'word')
