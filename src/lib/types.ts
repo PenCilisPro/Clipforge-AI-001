@@ -451,10 +451,8 @@ export function normalizeClipConfiguration(
     sourceVideo = context!.sourceUrl!.trim()
   } else if (isVideoExt(clip?.current_render_url)) {
     sourceVideo = clip!.current_render_url!
-  } else if (context?.thumbnailUrl || clip?.current_thumbnail_url) {
-    // Preserve thumbnail image URL for Ken Burns motion photo canvas
-    sourceVideo = (context?.thumbnailUrl || clip?.current_thumbnail_url)!.trim()
   } else {
+    // Default to a fast, reliable, pristine 1080p MP4 stream
     sourceVideo = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
   }
 

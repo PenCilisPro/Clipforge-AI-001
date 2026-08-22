@@ -106,21 +106,6 @@ const isDirectVideo = (url?: string | null): boolean => {
   )
 }
 
-const isDirectImage = (url?: string | null): boolean => {
-  if (!url) return false
-  const lower = url.trim().toLowerCase()
-  return (
-    lower.endsWith('.jpg') ||
-    lower.endsWith('.jpeg') ||
-    lower.endsWith('.png') ||
-    lower.endsWith('.webp') ||
-    lower.includes('images.unsplash.com') ||
-    lower.includes('i.ytimg.com') ||
-    lower.includes('ytimg.com') ||
-    lower.includes('unsplash')
-  )
-}
-
 export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
   const frame = useCurrentFrame()
   const { width, height, durationInFrames } = useVideoConfig()
@@ -135,18 +120,11 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
   const rawSource = (config?.sourceVideo || '').trim()
   const hasDirectVideo = isDirectVideo(rawSource)
-  const hasDirectImage = isDirectImage(rawSource)
 
-  // Primary video URL or high-speed resilient 10-minute HD sample stream
+  // Primary video URL: use the direct video source if provided, or high-speed resilient 10-minute HD sample stream
   const sourceVideo = hasDirectVideo
     ? rawSource
     : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
-
-  // Subtle Ken Burns slow pan & zoom for imagery or motion backgrounds
-  const kenBurnsZoom = interpolate(frame, [0, Math.max(1, durationInFrames)], [1, 1.08], {
-    extrapolateLeft: 'clamp',
-    extrapolateRight: 'clamp',
-  })
 
   // Pulsing ambient background glow
   const glowOpacity = interpolate(
@@ -169,50 +147,25 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
         />
       </AbsoluteFill>
 
-      {/* 2. Video Player Layer */}
-      {hasDirectVideo || !hasDirectImage ? (
-        <AbsoluteFill style={{ overflow: 'hidden' }}>
-          <Video
-            src={sourceVideo}
-            startFrom={hasDirectVideo ? startFrame : startFrame % 900}
-            endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 900) + durationInFrames}
-            playbackRate={config.speed || 1}
-            volume={config.originalVolume ?? 1}
-            crossOrigin="anonymous"
-            playsInline
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${scale})`,
-            }}
-          />
-        </AbsoluteFill>
-      ) : (
-        /* 3. High-Resolution Motion Photo Canvas with Ken Burns Zoom */
-        <AbsoluteFill style={{ overflow: 'hidden' }}>
-          <Img
-            src={rawSource}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${scale * kenBurnsZoom})`,
-              filter: 'brightness(0.88) contrast(1.08) saturate(1.15)',
-            }}
-          />
-          {/* Subtle cinematic top/bottom vignette overlay */}
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              background: 'linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, transparent 35%, rgba(0,0,0,0.4) 70%, rgba(0,0,0,0.85) 100%)',
-            }}
-          />
-        </AbsoluteFill>
-      )}
+      {/* 2. Video Player Layer (Always dynamic real video playback) */}
+      <AbsoluteFill style={{ overflow: 'hidden' }}>
+        <Video
+          src={sourceVideo}
+          startFrom={hasDirectVideo ? startFrame : startFrame % 900}
+          endAt={hasDirectVideo ? startFrame + durationInFrames : (startFrame % 900) + durationInFrames}
+          playbackRate={config.speed || 1}
+          volume={config.originalVolume ?? 1}
+          crossOrigin="anonymous"
+          playsInline
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            objectPosition: `${cropX * 100}% ${cropY * 100}%`,
+            transform: `scale(${scale})`,
+          }}
+        />
+      </AbsoluteFill>
 
       {/* B-Roll Segments */}
       {Array.isArray(config?.broll) &&

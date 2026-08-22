@@ -229,18 +229,6 @@ export async function generateWhisperCaptions({
   const clipEnd = typeof endTime === 'number' ? endTime : (clip.end_time || clipStart + 30)
   const clipDuration = Math.max(2, clipEnd - clipStart)
 
-  // 0. If transcript segments were provided from project processing, extract real speech first!
-  if (transcriptSegments && transcriptSegments.length > 0) {
-    const extracted = extractWordsFromTranscriptSegments(
-      transcriptSegments,
-      clipStart,
-      clipEnd,
-    )
-    if (extracted.length > 0) {
-      return extracted
-    }
-  }
-
   const apiKey =
     customApiKey?.trim() ||
     getStoredApiKey() ||
@@ -248,7 +236,7 @@ export async function generateWhisperCaptions({
       (import.meta.env?.VITE_OPENAI_API_KEY || import.meta.env?.VITE_OPENROUTER_API_KEY)) ||
     USER_NVIDIA_KEY
 
-  // 1. If no pre-sliced audio file was provided, try slicing the exact time slice from source media
+  // 1. If no pre-sliced audio file was provided, try slicing the exact time slice from the Remotion source video
   let audioFileToTranscribe = whisperAudioFile
   if (!audioFileToTranscribe && sourceMediaUrl && (sourceMediaUrl.startsWith('http') || sourceMediaUrl.startsWith('blob:'))) {
     try {
@@ -300,7 +288,19 @@ export async function generateWhisperCaptions({
     }
   }
 
-  // 2. AI Timing & Speech Reconstruction (Uses NVIDIA NIM Llama-3.1 / OpenAI GPT-4o-mini with viral cadence)
+  // 3. If detailed verbatim transcript segments are available from the full video, extract them
+  if (transcriptSegments && transcriptSegments.length > 0) {
+    const extracted = extractWordsFromTranscriptSegments(
+      transcriptSegments,
+      clipStart,
+      clipEnd,
+    )
+    if (extracted.length >= 10) {
+      return extracted
+    }
+  }
+
+  // 4. OpenAI / Whisper Speech Timing Engine: Generate speech dialogue tailored to the clip's hook and topic
   const prompt = `You are OpenAI Whisper & Viral Speech Timing Engine.
 A creator needs precise, word-by-word synced caption timestamps for a viral 9:16 short clip.
 
