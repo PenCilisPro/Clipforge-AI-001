@@ -288,6 +288,9 @@ export default function ClipStudio() {
       setClip(loadedClip)
       setVersions(loadedVersions)
       setActiveJob(((jobsRes.data as RenderJob[]) ?? [])[0] ?? null)
+      if (loadedClip.current_render_url) {
+        setPreviewMode('rendered')
+      }
       if (transcriptRes.data) {
         setTranscriptData(transcriptRes.data)
       }

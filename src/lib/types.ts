@@ -445,14 +445,14 @@ export function normalizeClipConfiguration(
     )
   }
 
-  if (isVideoExt(rawConfig?.sourceVideo)) {
+  if (isVideoExt(clip?.current_render_url)) {
+    sourceVideo = clip!.current_render_url!.trim()
+  } else if (isVideoExt(rawConfig?.sourceVideo)) {
     sourceVideo = rawConfig.sourceVideo.trim()
   } else if (isVideoExt(context?.storagePath)) {
     sourceVideo = context!.storagePath!.trim()
   } else if (isVideoExt(context?.sourceUrl)) {
     sourceVideo = context!.sourceUrl!.trim()
-  } else if (isVideoExt(clip?.current_render_url)) {
-    sourceVideo = clip!.current_render_url!
   } else {
     // Default to a fast, reliable, pristine 1080p MP4 stream
     sourceVideo = 'https://assets.mixkit.co/videos/preview/mixkit-vertical-view-of-a-dj-working-with-his-equipment-41485-large.mp4'
