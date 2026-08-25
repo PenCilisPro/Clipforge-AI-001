@@ -41,6 +41,11 @@ if (!OPENAI_API_KEY) {
   console.error('Missing OPENAI_API_KEY.')
   process.exit(1)
 }
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
+if (!ANTHROPIC_API_KEY) {
+  console.error('Missing ANTHROPIC_API_KEY.')
+  process.exit(1)
+}
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY
 if (!RAPIDAPI_KEY) {
   console.error('Missing RAPIDAPI_KEY.')
@@ -326,14 +331,14 @@ async function probeVideo(
   }
 }
 
-// 2. GPT-4o analyzes video context & structure to find optimal clip intervals without full transcription
+// 2. Claude Opus 5 analyzes video context & structure to find optimal clip intervals without full transcription
 async function findMomentsWithGpt4o(
   project: ProjectRow,
   title: string,
   duration: number,
   patterns: PatternRow[],
 ): Promise<Candidate[]> {
-  console.log(`  Asking GPT-4o to identify viral clip timestamps (Duration: ${Math.round(duration)}s)...`)
+  console.log(`  Asking Claude Opus 5 to identify viral clip timestamps (Duration: ${Math.round(duration)}s)...`)
   const targetCount = Math.min(project.max_clips || 6, 8)
   const durationTarget = project.clip_duration_preset === '15-30' ? '20-30' : project.clip_duration_preset === '60-90' ? '60-90' : '30-55'
 
@@ -351,7 +356,7 @@ Detect the best ${targetCount} moments in this video that would make high-perfor
 Distribute the start times across the full video timeline (e.g. intro hook at 0-30s, middle climax, major reveal, conclusion).
 Ensure each clip's start and end timestamps are realistic and within 0 and ${Math.round(duration)}.
 
-Return JSON matching this schema:
+Return JSON matching this schema exactly:
 {
   "clips": [
     {
@@ -372,28 +377,35 @@ Return JSON matching this schema:
 }`
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
-      },
+      } as Record<string, string>,
       body: JSON.stringify({
-        model: 'gpt-4o',
-        response_format: { type: 'json_object' },
+        model: 'claude-opus-5',
+        max_tokens: 4000,
         messages: [
           {
-            role: 'system',
-            content: 'You are an elite short-form video editor. Always respond with strict JSON.',
-          },
-          { role: 'user', content: prompt },
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: prompt
+              }
+            ]
+          }
         ],
       }),
     })
 
     if (res.ok) {
       const json = await res.json()
-      const parsed = JSON.parse(json.choices?.[0]?.message?.content || '{}')
+      // Extract text from Claude's response format
+      const textContent = json.content?.[0]?.text || '{}'
+      const parsed = JSON.parse(textContent)
       if (Array.isArray(parsed.clips) && parsed.clips.length > 0) {
         const patternMap = new Map(patterns.map((p) => [p.id, p]))
         return parsed.clips
@@ -428,7 +440,7 @@ Return JSON matching this schema:
       }
     }
   } catch (err: any) {
-    console.warn(`  GPT-4o candidate generation notice: ${err.message}`)
+    console.warn(`  Claude Opus 5 candidate generation notice: ${err.message}`)
   }
 
   // Fallback: Smart distributed timestamps

@@ -1075,20 +1075,27 @@ export default function ClipStudio() {
           </div>
 
           <div className="flex w-full flex-1 flex-col items-center justify-center">
-            {previewMode === 'live' || !hasRenderedPreview ? (
-              <RemotionPlayerPreview
-                config={config}
-                onAddCaptions={() => void handleGenerateCaptions()}
-                isGeneratingCaptions={generatingCaptions || syncingTranscript}
-                onUpdateConfig={update}
-              />
+            {activeJob?.stage === 'Rendering with Remotion engine…' ? (
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <p className="mt-2 text-sm text-zinc-400">Rendering your clip...</p>
+              </div>
             ) : (
-              <video
-                key={clip.current_render_url}
-                src={clip.current_render_url ?? undefined}
-                controls
-                className="aspect-[9/16] w-full max-w-[280px] rounded-lg bg-black object-contain shadow-2xl"
-              />
+              previewMode === 'live' || !hasRenderedPreview ? (
+                <RemotionPlayerPreview
+                  config={config}
+                  onAddCaptions={() => void handleGenerateCaptions()}
+                  isGeneratingCaptions={generatingCaptions || syncingTranscript}
+                  onUpdateConfig={update}
+                />
+              ) : (
+                <video
+                  key={clip.current_render_url}
+                  src={clip.current_render_url ?? undefined}
+                  controls
+                  className="aspect-[9/16] w-full max-w-[280px] rounded-lg bg-black object-contain shadow-2xl"
+                />
+              )
             )}
           </div>
 
