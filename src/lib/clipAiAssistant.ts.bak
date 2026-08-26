@@ -347,8 +347,13 @@ Example JSON output:
 }`
 
   try {
-    const endpoint = 'https://openrouter.ai/api/v1/chat/completions'
-const modelName = 'anthropic/claude-opus-5'
+    const isNvidia = apiKey.startsWith('nvapi-')
+    const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
+
+    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const modelName = 'anthropic/claude-opus-5';
+    // Unused but keep to avoid TS error
+    const _ = isNvidia || isDirectOpenAi;
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -483,16 +488,17 @@ Respond with strict JSON in this format:
 }`
 
   try {
-    const endpoint = 'https://openrouter.ai/api/v1/chat/completions'
-const modelName = 'anthropic/claude-opus-5'
+    const isNvidia = apiKey.startsWith('nvapi-')
+    const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
+
+    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const modelName = 'anthropic/claude-opus-5';
+    // Unused but keep to avoid TS error
+    const _ = isNvidia || isDirectOpenAi;
 
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://clipforge.app',
-        "Content-Type": "application/json",
-        'X-Title': 'ClipForge AI B-Roll',
       },
       body: JSON.stringify({
         model: modelName,
