@@ -194,12 +194,18 @@ async function downloadViaRapidApi(
       return false
     }
 
-    console.log(`  Downloading direct media stream from RapidAPI...`)
+    console.log(`  Downloading direct media stream from RapidAPI (${downloadUrl})...`)
     const mediaResp = await fetch(downloadUrl)
     if (!mediaResp.ok) throw new Error(`RapidAPI media fetch failed with status: ${mediaResp.status}`)
     const arrayBuffer = await mediaResp.arrayBuffer()
     writeFileSync(outPath, Buffer.from(arrayBuffer))
-    console.log(`  RapidAPI download succeeded (${Math.round(arrayBuffer.byteLength / 1024 / 1024)} MB).`)
+    // Verify the file was actually written and has non‑zero size
+    const stats = statSync(outPath)
+    if (stats.size === 0) {
+      console.warn('  RapidAPI download resulted in an empty file.')
+      return false
+    }
+    console.log(`  RapidAPI download succeeded (${Math.round(stats.size / 1024 / 1024)} MB).`)
     return true
   } catch (err: any) {
     console.warn(`  RapidAPI download failed: ${err.message}`)
