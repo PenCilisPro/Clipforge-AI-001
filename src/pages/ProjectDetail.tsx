@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { Film, RefreshCw, Sparkles, Loader2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { processProjectInBrowser } from '@/lib/clientProcessor'
-import type { Project, Video, Transcript, Clip } from '@/lib/types'
+import type { Project, Video, Transcript, Clip, RenderJob } from '@/lib/types'
 import { normalizeClipConfiguration } from '@/lib/types'
 import { formatDuration, formatTimestamp } from '@/lib/format'
 import {
@@ -11,6 +11,7 @@ import {
   StatusBadge,
   LoadingState,
   Modal,
+  ProgressBar,
 } from '@/components/ui'
 import ClipCard from '@/components/ClipCard'
 import { ProcessingProgressTracker } from '@/components/ProcessingProgressTracker'
@@ -28,6 +29,7 @@ export default function ProjectDetail() {
   const [previewClip, setPreviewClip] = useState<Clip | null>(null)
   const [showTranscript, setShowTranscript] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [activeRenderJob, setActiveRenderJob] = useState<RenderJob | null>(null)
 
   const loadAll = useCallback(async () => {
     if (!projectId) return
@@ -40,7 +42,22 @@ export default function ProjectDetail() {
     setProject(p.data as Project | null)
     setVideo(v.data as Video | null)
     setTranscript(t.data as Transcript | null)
-    setClips((c.data as Clip[]) ?? [])
+    const clipsData = (c.data as Clip[]) ?? []
+    setClips(clipsData)
+    // Fetch active render job for any of the project's clips
+    const clipIds = clipsData.map(clip => clip.id)
+    let activeJob: RenderJob | null = null
+    if (clipIds.length > 0) {
+      const { data: renderJobs } = await supabase
+        .from('render_jobs')
+        .select('*')
+        .in('clip_id', clipIds)
+        .in('status', ['QUEUED','PREPARING','RENDERING','UPLOADING'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+      activeJob = renderJobs?.[0] ?? null
+    }
+    setActiveRenderJob(activeJob)
   }, [projectId])
 
   useEffect(() => {
@@ -123,6 +140,19 @@ export default function ProjectDetail() {
         isProcessingNow={retrying}
         errorMessage={project.error_message}
       />
+
+      {/* Active Remotion Render Job Progress */}
+      {activeRenderJob && (
+        <div className="card mb-4 p-4">
+          <div className="mb-2 flex items-center justify-between text-sm">
+            <span className="font-medium text-brand-400">
+              {activeRenderJob.stage ?? 'Rendering with Remotion engine…'}
+            </span>
+            <span className="tabular-nums text-zinc-400">{Math.round(activeRenderJob.progress)}%</span>
+          </div>
+          <ProgressBar value={activeRenderJob.progress} />
+        </div>
+      )}
 
       <div className="mb-6 grid gap-6 lg:grid-cols-3">
         <div className="card overflow-hidden lg:col-span-2">
