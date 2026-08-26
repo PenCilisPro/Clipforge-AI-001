@@ -113,7 +113,7 @@ export function ProcessingProgressTracker({
   // Calculate dynamic display progress
   const displayProgress = isComplete
     ? 100
-    : Math.max(progress, PIPELINE_STEPS[activeStepIndex]?.minProgress || 10)
+    : progress
 
   return (
     <div className="card mb-8 overflow-hidden border border-surface-700 bg-surface-900/90 shadow-xl backdrop-blur-sm">

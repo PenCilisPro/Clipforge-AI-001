@@ -279,7 +279,7 @@ async function updateProjectProgress(projectId: string): Promise<void> {
     if (clipsError) throw clipsError
     const clipIds = clipsData?.map(c => c.id) || []
     if (clipIds.length === 0) {
-      // No clips, set progress to 0 and status to QUEUED
+      // No clips, set progress to 0 and status to QUEUED? We'll set to QUEUED.
       await supabase
         .from('projects')
         .update({ progress: 0, status: 'QUEUED' })
@@ -287,58 +287,41 @@ async function updateProjectProgress(projectId: string): Promise<void> {
       return
     }
 
-    // Get all render jobs for these clips with their progress
-    const { data: jobsData, error: jobsError } = await supabase
+    // Get total render jobs for these clips
+    const { data: totalData, error: totalError, count: totalCount } = await supabase
       .from('render_jobs')
-      .select('id, status, progress')
+      .select('id', { count: 'exact' })
       .in('clip_id', clipIds)
-    if (jobsError) throw jobsError
-    const jobs = jobsData || []
+    if (totalError) throw totalError
+    const total = totalCount ?? 0
 
-    if (jobs.length === 0) {
-      // No jobs yet, set progress to 0 and status to QUEUED
-      await supabase
-        .from('projects')
-        .update({ progress: 0, status: 'QUEUED' })
-      .eq('id', projectId)
-      return
+    // Get completed render jobs for these clips
+    const { data: completedData, error: completedError, count: completedCount } = await supabase
+      .from('render_jobs')
+      .select('id', { count: 'exact' })
+      .in('clip_id', clipIds)
+      .eq('status', 'COMPLETED')
+    if (completedError) throw completedError
+    const completed = completedCount ?? 0
+
+    // Get failed render jobs for these clips
+    const { data: failedData, error: failedError, count: failedCount } = await supabase
+      .from('render_jobs')
+      .select('id', { count: 'exact' })
+      .in('clip_id', clipIds)
+      .eq('status', 'FAILED')
+    if (failedError) throw failedError
+    const failed = failedCount ?? 0
+
+    let progress = 0
+    if (total > 0) {
+      progress = Math.round((completed / total) * 100)
     }
-
-    // Calculate weighted progress:
-    // - COMPLETED jobs: 100%
-    // - FAILED jobs: 0%
-    // - RENDERING/CLAIMED jobs: use their progress value
-    // - QUEUED jobs: 0%
-    let totalProgress = 0
-    let failedCount = 0
-    for (const job of jobs) {
-      let jobProgress = 0
-      switch (job.status) {
-        case 'COMPLETED':
-          jobProgress = 100
-          break
-        case 'FAILED':
-          jobProgress = 0
-          failedCount++
-          break
-        case 'RENDERING':
-        case 'CLAIMED':
-          jobProgress = job.progress || 0
-          break
-        case 'QUEUED':
-        default:
-          jobProgress = 0
-          break
-      }
-      totalProgress += jobProgress
-    }
-
-    const progress = Math.round(totalProgress / jobs.length)
 
     let status: string
-    if (failedCount > 0) {
+    if (failed > 0) {
       status = 'FAILED'
-    } else if (jobs.every(j => j.status === 'COMPLETED')) {
+    } else if (completed === total) {
       status = 'COMPLETED'
     } else {
       status = 'RENDERING'
@@ -352,6 +335,16 @@ async function updateProjectProgress(projectId: string): Promise<void> {
     console.error(`Failed to update project progress for ${projectId}:`, err)
   }
 }
+async function claimNextJob(): Promise<RenderJobRow | null> {
+  const { data, error } = await supabase
+    .from('render_jobs')
+    .select('id, clip_id, clip_version_id, status')
+    .eq('status', 'QUEUED')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    console.error('Failed to poll render jobs:', error.message)
     return null
   }
   if (!data) return null
