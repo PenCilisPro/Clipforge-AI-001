@@ -1,138 +1,232 @@
-// ClipForge processing pipeline worker.
+// ClipForge AI — Processing Pipeline Worker
 //
-// Workflow:
-// 1. Download source video (RapidAPI / Supabase Storage)
-// 2. Claude Opus 5 analyzes video context & duration to detect the best viral clip intervals
-// 3. Remotion / FFmpeg clips the video segment FIRST into an MP4 file
-// 4. OpenAI Whisper transcribes ONLY the short clipped video (word timestamps 0.0s - 30.0s)
-// 5. Final product (video + kinetic captions + b-roll + music) is uploaded to Supabase Storage
-//    and delivered directly to the frontend so the moving video plays immediately!
+// Pipeline:
+// 1. Claim QUEUED project
+// 2. Download source video
+// 3. Probe source
+// 4. Analyze video with Claude
+// 5. Create clip records
+// 6. Prepare clip source + Whisper captions + B-roll + music
+// 7. Create clip_versions as QUEUED
+// 8. Create render_jobs as QUEUED
+// 9. Wait for Remotion worker
+// 10. Aggregate render job progress
+// 11. Complete project only when ALL render jobs are completed
 //
-// Run with: npm run pipeline
+// Run:
+//   npm run pipeline
 
-import { execFile } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { promisify } from 'node:util'
-import { createClient } from '@supabase/supabase-js'
+import { execFile } from "node:child_process";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+
+import { createClient } from "@supabase/supabase-js";
+
 import type {
   BrollConfigItem,
   CaptionWordConfig,
   ClipConfiguration,
   MusicConfig,
-} from './src/types'
+} from "./src/types";
 
-const execFileAsync = promisify(execFile)
+const execFileAsync = promisify(execFile);
 
-// Required environment variables – no fallback defaults for security
-const SUPABASE_URL = process.env.SUPABASE_URL
-if (!SUPABASE_URL) {
-  console.error('Missing SUPABASE_URL.')
-  process.exit(1)
-}
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-if (!SERVICE_ROLE_KEY) {
-  console.error('Missing SUPABASE_SERVICE_ROLE_KEY.')
-  process.exit(1)
-}
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
-if (!OPENAI_API_KEY) {
-  console.error('Missing OPENAI_API_KEY.')
-  process.exit(1)
-}
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
-if (!ANTHROPIC_API_KEY) {
-  console.error('Missing ANTHROPIC_API_KEY.')
-  process.exit(1)
-}
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY
-if (!RAPIDAPI_KEY) {
-  console.error('Missing RAPIDAPI_KEY.')
-  process.exit(1)
-}
-// RAPIDAPI_HOST has a safe fallback
-const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || 'youtube-media-downloader.p.rapidapi.com'
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY
-if (!YOUTUBE_API_KEY) {
-  console.error('Missing YOUTUBE_API_KEY.')
-  process.exit(1)
-}
-const PEXELS_API_KEY = process.env.PEXELS_API_KEY
-if (!PEXELS_API_KEY) {
-  console.error('Missing PEXELS_API_KEY.')
-  process.exit(1)
-}
-const JAMENDO_CLIENT_ID = process.env.JAMENDO_CLIENT_ID
-if (!JAMENDO_CLIENT_ID) {
-  console.error('Missing JAMENDO_CLIENT_ID.')
-  process.exit(1)
+// ============================================================================
+// ENVIRONMENT
+// ============================================================================
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+
+  if (!value) {
+    console.error(`Missing ${name}.`);
+    process.exit(1);
+  }
+
+  return value;
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
-})
+const SUPABASE_URL = requireEnv("SUPABASE_URL");
+const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
+  "SUPABASE_SERVICE_ROLE_KEY",
+);
 
-const POLL_INTERVAL_MS = 5000
+const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
+const ANTHROPIC_API_KEY = requireEnv("ANTHROPIC_API_KEY");
+const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
+const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
+const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
+
+const RAPIDAPI_HOST =
+  process.env.RAPIDAPI_HOST ||
+  "youtube-media-downloader.p.rapidapi.com";
+
+// ============================================================================
+// API HEADERS
+//
+// Explicit Record<string, string> prevents TypeScript from complaining
+// about fetch HeadersInit / header values.
+// ============================================================================
+
+const anthropicHeaders: Record<string, string> = {
+  "x-api-key": ANTHROPIC_API_KEY,
+  "anthropic-version": "2023-06-01",
+  "content-type": "application/json",
+};
+
+const rapidApiHeaders: Record<string, string> = {
+  "x-rapidapi-key": RAPIDAPI_KEY,
+  "x-rapidapi-host": RAPIDAPI_HOST,
+};
+
+const pexelsHeaders: Record<string, string> = {
+  Authorization: PEXELS_API_KEY,
+};
+
+const openAiHeaders: Record<string, string> = {
+  Authorization: `Bearer ${OPENAI_API_KEY}`,
+};
+
+// ============================================================================
+// SUPABASE
+// ============================================================================
+
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
+    },
+  },
+);
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const POLL_INTERVAL_MS = 5000;
+const RENDER_POLL_INTERVAL_MS = 1500;
+
+const RENDER_PHASE_START = 60;
+const RENDER_PHASE_END = 100;
+
+// ============================================================================
+// TYPES
+// ============================================================================
 
 interface ProjectRow {
-  id: string
-  user_id: string
-  name: string
-  source_type: 'youtube' | 'upload'
-  source_url: string | null
-  status: string
-  pattern_set_id: string | null
-  clip_duration_preset: '15-30' | '30-60' | '60-90' | 'ai'
-  max_clips: number
-  auto_broll: boolean
-  auto_music: boolean
-  caption_preset: string
-  ai_optimization: boolean
+  id: string;
+  user_id: string;
+  name: string;
+
+  source_type: "youtube" | "upload";
+  source_url: string | null;
+
+  status: string;
+
+  pattern_set_id: string | null;
+
+  clip_duration_preset:
+    | "15-30"
+    | "30-60"
+    | "60-90"
+    | "ai";
+
+  max_clips: number;
+
+  auto_broll: boolean;
+  auto_music: boolean;
+
+  caption_preset: string;
+  ai_optimization: boolean;
 }
 
 interface VideoRow {
-  id: string
-  project_id: string
-  storage_path: string | null
-  youtube_video_id: string | null
+  id: string;
+  project_id: string;
+  storage_path: string | null;
+  youtube_video_id: string | null;
 }
 
 interface PatternRow {
-  id: string
-  name: string
-  category: string
-  start_signal: string
-  end_signal: string
-  score: number
-  keywords: string[]
-  is_active: boolean
+  id: string;
+  name: string;
+  category: string;
+  start_signal: string;
+  end_signal: string;
+  score: number;
+  keywords: string[];
+  is_active: boolean;
 }
 
 interface Candidate {
-  start: number
-  end: number
-  title: string
-  hook: string
-  topic: string
-  category: string
-  patternId: string | null
-  patternName: string | null
-  patternScore: number
-  hookScore: number
-  engagementScore: number
-  emotionalScore: number
-  shareabilityScore: number
-  completenessScore: number
-  score: number
+  start: number;
+  end: number;
+
+  title: string;
+  hook: string;
+  topic: string;
+  category: string;
+
+  patternId: string | null;
+  patternName: string | null;
+
+  patternScore: number;
+  hookScore: number;
+  engagementScore: number;
+  emotionalScore: number;
+  shareabilityScore: number;
+  completenessScore: number;
+
+  score: number;
+}
+
+interface RenderJobRow {
+  id: string;
+  clip_id: string;
+  clip_version_id: string;
+
+  status: string;
+  progress: number;
+  stage: string | null;
+  error_message: string | null;
+}
+
+// ============================================================================
+// UTILITY
+// ============================================================================
+
+function clampProgress(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(
+    0,
+    Math.min(100, Math.round(value)),
+  );
 }
 
 function extractYoutubeId(url: string): string | null {
   const match = url.match(
     /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([\w-]{11})/,
-  )
-  return match ? match[1] : null
+  );
+
+  return match ? match[1] : null;
 }
+
+// ============================================================================
+// PROJECT STATUS
+// ============================================================================
 
 async function setStatus(
   projectId: string,
@@ -140,190 +234,649 @@ async function setStatus(
   progress: number,
   errorMessage: string | null = null,
 ): Promise<void> {
-  console.log(`  [${projectId}] ${status} (${progress}%)`)
-  await supabase
-    .from('projects')
-    .update({ status, progress, error_message: errorMessage })
-    .eq('id', projectId)
+  const safeProgress = clampProgress(progress);
+
+  console.log(
+    `  [${projectId}] ${status} (${safeProgress}%)`,
+  );
+
+  const { error } = await supabase
+    .from("projects")
+    .update({
+      status,
+      progress: safeProgress,
+      error_message: errorMessage,
+    })
+    .eq("id", projectId);
+
+  if (error) {
+    console.error(
+      `Failed to update project ${projectId}:`,
+      error.message,
+    );
+  }
 }
+
+// ============================================================================
+// RENDER JOBS
+// ============================================================================
+
+async function getProjectRenderJobs(
+  projectId: string,
+): Promise<RenderJobRow[]> {
+  const {
+    data: clips,
+    error: clipsError,
+  } = await supabase
+    .from("clips")
+    .select("id")
+    .eq("project_id", projectId);
+
+  if (clipsError) {
+    throw new Error(
+      `Failed to load project clips: ${clipsError.message}`,
+    );
+  }
+
+  const clipIds = (clips ?? []).map(
+    (clip: { id: string }) => clip.id,
+  );
+
+  if (clipIds.length === 0) {
+    return [];
+  }
+
+  const {
+    data: jobs,
+    error: jobsError,
+  } = await supabase
+    .from("render_jobs")
+    .select(
+      `
+        id,
+        clip_id,
+        clip_version_id,
+        status,
+        progress,
+        stage,
+        error_message
+      `,
+    )
+    .in("clip_id", clipIds)
+    .order("created_at", {
+      ascending: true,
+    });
+
+  if (jobsError) {
+    throw new Error(
+      `Failed to load render jobs: ${jobsError.message}`,
+    );
+  }
+
+  return (jobs ?? []) as RenderJobRow[];
+}
+
+function calculateRenderProgress(
+  jobs: RenderJobRow[],
+): number {
+  if (jobs.length === 0) {
+    return 0;
+  }
+
+  const total = jobs.reduce(
+    (sum, job) =>
+      sum + Number(job.progress || 0),
+    0,
+  );
+
+  return total / jobs.length;
+}
+
+function mapRenderProgressToProjectProgress(
+  renderProgress: number,
+): number {
+  const normalized = clampProgress(renderProgress);
+
+  const projectProgress =
+    RENDER_PHASE_START +
+    (normalized / 100) *
+      (RENDER_PHASE_END - RENDER_PHASE_START);
+
+  return clampProgress(projectProgress);
+}
+
+async function syncProjectRenderProgress(
+  projectId: string,
+): Promise<{
+  jobs: RenderJobRow[];
+  renderProgress: number;
+  projectProgress: number;
+  allCompleted: boolean;
+  anyFailed: boolean;
+}> {
+  const jobs =
+    await getProjectRenderJobs(projectId);
+
+  if (jobs.length === 0) {
+    return {
+      jobs: [],
+      renderProgress: 0,
+      projectProgress: RENDER_PHASE_START,
+      allCompleted: false,
+      anyFailed: false,
+    };
+  }
+
+  const renderProgress =
+    calculateRenderProgress(jobs);
+
+  const allCompleted =
+    jobs.length > 0 &&
+    jobs.every(
+      (job) => job.status === "COMPLETED",
+    );
+
+  const anyFailed =
+    jobs.some(
+      (job) => job.status === "FAILED",
+    );
+
+  const projectProgress = allCompleted
+    ? 100
+    : mapRenderProgressToProjectProgress(
+        renderProgress,
+      );
+
+  const activeStatuses = jobs
+    .map(
+      (job) =>
+        `${job.status}:${job.progress}%`,
+    )
+    .join(", ");
+
+  console.log(
+    `  Render progress: ${renderProgress.toFixed(
+      1,
+    )}% -> project ${projectProgress}%`,
+  );
+
+  console.log(`  Jobs: ${activeStatuses}`);
+
+  if (anyFailed) {
+    const failedJob = jobs.find(
+      (job) => job.status === "FAILED",
+    );
+
+    await setStatus(
+      projectId,
+      "FAILED",
+      projectProgress,
+      failedJob?.error_message ||
+        "One or more Remotion render jobs failed.",
+    );
+  } else if (allCompleted) {
+    await setStatus(
+      projectId,
+      "COMPLETED",
+      100,
+      null,
+    );
+  } else {
+    await setStatus(
+      projectId,
+      "RENDERING",
+      projectProgress,
+      null,
+    );
+  }
+
+  return {
+    jobs,
+    renderProgress,
+    projectProgress,
+    allCompleted,
+    anyFailed,
+  };
+}
+
+// ============================================================================
+// YOUTUBE DOWNLOAD
+// ============================================================================
 
 async function downloadViaRapidApi(
   youtubeUrl: string,
-  videoId: string,
   outPath: string,
 ): Promise<boolean> {
-  const rapidApiKey = RAPIDAPI_KEY
-  const rapidApiHost = RAPIDAPI_HOST || 'youtube-media-downloader.p.rapidapi.com'
+  console.log(
+    `  Attempting YouTube download via RapidAPI (${RAPIDAPI_HOST})...`,
+  );
 
-  if (!rapidApiKey) return false
-
-  console.log(`  Attempting YouTube download via RapidAPI (${rapidApiHost})...`)
   try {
-    // Use the dedicated download endpoint
-    const resp = await fetch(`https://${rapidApiHost}/v2/video/download?url=${encodeURIComponent(youtubeUrl)}`, {
-      headers: {
-        'x-rapidapi-key': rapidApiKey,
-        'x-rapidapi-host': rapidApiHost,
-      },
-    })
+    const endpoint =
+      `https://${RAPIDAPI_HOST}/v2/video/download` +
+      `?url=${encodeURIComponent(youtubeUrl)}`;
 
-    if (!resp.ok) {
-      console.warn(`    RapidAPI download endpoint responded with status: ${resp.status}`)
-      return false
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: rapidApiHeaders,
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `  RapidAPI returned ${response.status}`,
+      );
+
+      return false;
     }
 
-    // Determine the actual download URL from the response
-    let downloadUrl: string | null = null
-    const contentType = resp.headers.get('content-type') || ''
-    if (contentType.includes('application/json')) {
-      const data = await resp.json()
-      if (data.downloadUrl && typeof data.downloadUrl === 'string') {
-        downloadUrl = data.downloadUrl
-      } else if (data.link && typeof data.link === 'string') {
-        downloadUrl = data.link
-      } else if (data.url && typeof data.url === 'string') {
-        downloadUrl = data.url
+    let downloadUrl: string | null = null;
+
+    const contentType =
+      response.headers.get("content-type") || "";
+
+    if (
+      contentType.includes("application/json")
+    ) {
+      const data = (await response.json()) as any;
+
+      if (
+        typeof data.downloadUrl === "string"
+      ) {
+        downloadUrl = data.downloadUrl;
+      } else if (
+        typeof data.download_url === "string"
+      ) {
+        downloadUrl = data.download_url;
+      } else if (
+        typeof data.link === "string"
+      ) {
+        downloadUrl = data.link;
+      } else if (
+        typeof data.url === "string"
+      ) {
+        downloadUrl = data.url;
       }
-    } else {
-      // If the response is not JSON, assume the final URL (after redirects) is the media file
-      downloadUrl = resp.url
+
+      // Some download APIs return nested media objects.
+      if (!downloadUrl && data.data) {
+        if (
+          typeof data.data.downloadUrl ===
+          "string"
+        ) {
+          downloadUrl =
+            data.data.downloadUrl;
+        } else if (
+          typeof data.data.url === "string"
+        ) {
+          downloadUrl = data.data.url;
+        }
+      }
     }
 
     if (!downloadUrl) {
-      console.warn('    RapidAPI did not provide a download URL.')
-      return false
+      console.warn(
+        "RapidAPI did not provide a download URL.",
+      );
+
+      return false;
     }
 
-    console.log(`  Downloading direct media stream from RapidAPI (${downloadUrl})...`)
-    const mediaResp = await fetch(downloadUrl)
-    if (!mediaResp.ok) throw new Error(`RapidAPI media fetch failed with status: ${mediaResp.status}`)
-    const arrayBuffer = await mediaResp.arrayBuffer()
-    writeFileSync(outPath, Buffer.from(arrayBuffer))
-    // Verify the file was actually written and has non‑zero size
-    const stats = statSync(outPath)
-    if (stats.size === 0) {
-      console.warn('  RapidAPI download resulted in an empty file.')
-      return false
+    console.log(
+      "  Downloading media...",
+    );
+
+    const mediaResponse =
+      await fetch(downloadUrl);
+
+    if (!mediaResponse.ok) {
+      throw new Error(
+        `Media download failed: ${mediaResponse.status}`,
+      );
     }
-    console.log(`  RapidAPI download succeeded (${Math.round(stats.size / 1024 / 1024)} MB).`)
-    return true
-  } catch (err: any) {
-    console.warn(`  RapidAPI download failed: ${err.message}`)
-    return false
+
+    const arrayBuffer =
+      await mediaResponse.arrayBuffer();
+
+    writeFileSync(
+      outPath,
+      Buffer.from(arrayBuffer),
+    );
+
+    const stats = statSync(outPath);
+
+    if (stats.size <= 0) {
+      return false;
+    }
+
+    console.log(
+      `  Downloaded ${Math.round(
+        stats.size / 1024 / 1024,
+      )} MB`,
+    );
+
+    return true;
+  } catch (error) {
+    console.warn(
+      "RapidAPI download failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+    );
+
+    return false;
   }
 }
 
-async function downloadSource(project: ProjectRow, workDir: string): Promise<string> {
-  const outPath = path.join(workDir, 'source.mp4')
+// ============================================================================
+// SOURCE DOWNLOAD
+// ============================================================================
 
-  if (project.source_type === 'youtube') {
-    if (!project.source_url) throw new Error('Project has no YouTube URL.')
-    await setStatus(project.id, 'DOWNLOADING', 5)
+async function downloadSource(
+  project: ProjectRow,
+  workDir: string,
+): Promise<string> {
+  const outPath = path.join(
+    workDir,
+    "source.mp4",
+  );
 
-    const videoId = extractYoutubeId(project.source_url)
-    if (!RAPIDAPI_KEY) throw new Error('Missing RAPIDAPI_KEY for YouTube download.')
-    if (!videoId) throw new Error('Could not extract YouTube video ID.')
+  await setStatus(
+    project.id,
+    "DOWNLOADING",
+    5,
+  );
 
-    const success = await downloadViaRapidApi(project.source_url, videoId, outPath)
-    if (!success) throw new Error('RapidAPI download failed.')
+  // --------------------------------------------------------------------------
+  // YouTube
+  // --------------------------------------------------------------------------
 
-    // Upload the source into storage so re-renders never re-download.
-    const storagePath = `projects/${project.id}/source/source.mp4`
-    const { error: uploadError } = await supabase.storage
-      .from('sources')
-      .upload(storagePath, readFileSync(outPath), {
-        contentType: 'video/mp4',
-        upsert: true,
-      })
+  if (
+    project.source_type === "youtube"
+  ) {
+    if (!project.source_url) {
+      throw new Error(
+        "Project has no YouTube URL.",
+      );
+    }
+
+    const videoId =
+      extractYoutubeId(
+        project.source_url,
+      );
+
+    if (!videoId) {
+      throw new Error(
+        "Could not extract YouTube video ID.",
+      );
+    }
+
+    console.log(
+      `  YouTube video ID: ${videoId}`,
+    );
+
+    const success =
+      await downloadViaRapidApi(
+        project.source_url,
+        outPath,
+      );
+
+    if (!success) {
+      throw new Error(
+        "RapidAPI YouTube download failed.",
+      );
+    }
+
+    const storagePath =
+      `projects/${project.id}/source/source.mp4`;
+
+    const {
+      error: uploadError,
+    } = await supabase.storage
+      .from("sources")
+      .upload(
+        storagePath,
+        readFileSync(outPath),
+        {
+          contentType: "video/mp4",
+          upsert: true,
+        },
+      );
+
     if (uploadError) {
-      console.warn(`  Source upload to storage failed: ${uploadError.message}`)
+      console.warn(
+        `Source upload failed: ${uploadError.message}`,
+      );
     } else {
-      await supabase
-        .from('videos')
-        .update({ storage_path: storagePath, file_size: statSync(outPath).size })
-        .eq('project_id', project.id)
+      const {
+        error: videoUpdateError,
+      } = await supabase
+        .from("videos")
+        .update({
+          storage_path: storagePath,
+          file_size:
+            statSync(outPath).size,
+        })
+        .eq(
+          "project_id",
+          project.id,
+        );
+
+      if (videoUpdateError) {
+        console.warn(
+          `Video record update failed: ${videoUpdateError.message}`,
+        );
+      }
     }
-    return outPath
+
+    return outPath;
   }
 
-  // Uploaded source: download from the private sources bucket.
-  await setStatus(project.id, 'DOWNLOADING', 5)
-  const { data: video } = await supabase
-    .from('videos')
-    .select('id, project_id, storage_path, youtube_video_id')
-    .eq('project_id', project.id)
-    .maybeSingle()
-  const videoRow = video as VideoRow | null
-  if (!videoRow?.storage_path) throw new Error('Uploaded source not found in storage.')
-  const { data: signed, error: signError } = await supabase.storage
-    .from('sources')
-    .createSignedUrl(videoRow.storage_path, 3600)
-  if (signError || !signed) throw new Error(`Cannot sign source URL: ${signError?.message}`)
-  const res = await fetch(signed.signedUrl)
-  if (!res.ok) throw new Error(`Source download failed: ${res.status}`)
-  const bytes = Buffer.from(await res.arrayBuffer())
-  writeFileSync(outPath, bytes)
-  return outPath
+  // --------------------------------------------------------------------------
+  // Uploaded source
+  // --------------------------------------------------------------------------
+
+  const {
+    data: video,
+    error: videoError,
+  } = await supabase
+    .from("videos")
+    .select(
+      "id, project_id, storage_path, youtube_video_id",
+    )
+    .eq(
+      "project_id",
+      project.id,
+    )
+    .maybeSingle();
+
+  if (videoError) {
+    throw new Error(
+      `Failed to load uploaded video: ${videoError.message}`,
+    );
+  }
+
+  const videoRow =
+    video as VideoRow | null;
+
+  if (!videoRow?.storage_path) {
+    throw new Error(
+      "Uploaded source not found in storage.",
+    );
+  }
+
+  const {
+    data: signed,
+    error: signError,
+  } =
+    await supabase.storage
+      .from("sources")
+      .createSignedUrl(
+        videoRow.storage_path,
+        3600,
+      );
+
+  if (
+    signError ||
+    !signed
+  ) {
+    throw new Error(
+      `Cannot sign source URL: ${
+        signError?.message ||
+        "unknown error"
+      }`,
+    );
+  }
+
+  const response = await fetch(
+    signed.signedUrl,
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Source download failed: ${response.status}`,
+    );
+  }
+
+  const bytes = Buffer.from(
+    await response.arrayBuffer(),
+  );
+
+  writeFileSync(
+    outPath,
+    bytes,
+  );
+
+  return outPath;
 }
+
+// ============================================================================
+// VIDEO PROBE
+// ============================================================================
 
 async function probeVideo(
   filePath: string,
-): Promise<{ duration: number; width: number; height: number }> {
-  const { stdout } = await execFileAsync('ffprobe', [
-    '-v',
-    'quiet',
-    '-print_format',
-    'json',
-    '-show_format',
-    '-show_streams',
-    filePath,
-  ])
+): Promise<{
+  duration: number;
+  width: number;
+  height: number;
+}> {
+  const { stdout } =
+    await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        filePath,
+      ],
+    );
+
   const info = JSON.parse(stdout) as {
-    format: { duration: string }
-    streams: Array<{ codec_type: string; width?: number; height?: number }>
-  }
-  const videoStream = info.streams.find((s) => s.codec_type === 'video')
+    format?: {
+      duration?: string;
+    };
+    streams?: Array<{
+      codec_type: string;
+      width?: number;
+      height?: number;
+    }>;
+  };
+
+  const videoStream =
+    info.streams?.find(
+      (stream) =>
+        stream.codec_type === "video",
+    );
+
   return {
-    duration: Number(info.format.duration),
-    width: videoStream?.width ?? 0,
-    height: videoStream?.height ?? 0,
-  }
+    duration: Number(
+      info.format?.duration || 0,
+    ),
+    width:
+      videoStream?.width ?? 0,
+    height:
+      videoStream?.height ?? 0,
+  };
 }
 
-// 2. Claude Opus 5 analyzes video context & structure to find optimal clip intervals without full transcription
-async function findMomentsWithClaudeOpus5(
+// ============================================================================
+// CLAUDE CANDIDATE DETECTION
+// ============================================================================
+
+async function findMomentsWithClaude(
   project: ProjectRow,
   title: string,
   duration: number,
   patterns: PatternRow[],
 ): Promise<Candidate[]> {
-  console.log(`  Asking Claude Opus 5 to identify viral clip timestamps (Duration: ${Math.round(duration)}s)...`)
-  const targetCount = Math.min(project.max_clips || 6, 8)
-  const durationTarget = project.clip_duration_preset === '15-30' ? '20-30' : project.clip_duration_preset === '60-90' ? '60-90' : '30-55'
+  const targetCount = Math.min(
+    project.max_clips || 6,
+    8,
+  );
 
-  const prompt = `You are ClipForge AI, an expert video clipping and viral retention specialist.
-Given this video:
-- Title: "${title}"
-- Duration: ${Math.round(duration)} seconds
-- Target Clip Duration: ${durationTarget} seconds
-- Target Number of Clips: ${targetCount}
+  const durationTarget =
+    project.clip_duration_preset ===
+    "15-30"
+      ? "20-30"
+      : project.clip_duration_preset ===
+          "60-90"
+        ? "60-90"
+        : "30-55";
 
-Available Viral Hook Patterns:
-${patterns.map((p) => `- ID: ${p.id}, Name: "${p.name}", Category: "${p.category}", Signal: "${p.start_signal}"`).join('\n')}
+  const patternText =
+    patterns.length > 0
+      ? patterns
+          .map(
+            (pattern) =>
+              `- ID: ${pattern.id}, Name: "${pattern.name}", Category: "${pattern.category}", Start signal: "${pattern.start_signal}", End signal: "${pattern.end_signal}", Score: ${pattern.score}`,
+          )
+          .join("\n")
+      : "No predefined patterns are available.";
 
-Detect the best ${targetCount} moments in this video that would make high-performing 9:16 Shorts/Reels/TikToks.
-Distribute the start times across the full video timeline (e.g. intro hook at 0-30s, middle climax, major reveal, conclusion).
-Ensure each clip's start and end timestamps are realistic and within 0 and ${Math.round(duration)}.
+  const prompt = `
+You are ClipForge AI, an expert video clipping and viral retention specialist.
 
-Return JSON matching this schema exactly:
+Video title:
+"${title}"
+
+Video duration:
+${Math.round(duration)} seconds
+
+Target clip duration:
+${durationTarget}
+
+Target number of clips:
+${targetCount}
+
+Available viral hook patterns:
+${patternText}
+
+Find the best ${targetCount} moments that could perform well as:
+- YouTube Shorts
+- TikTok
+- Instagram Reels
+
+Important:
+- Timestamps must be inside the source video.
+- end must be greater than start.
+- Prefer complete thoughts.
+- Prefer strong hooks.
+- Avoid starting in the middle of a sentence.
+- Distribute timestamps throughout the video when possible.
+
+Return ONLY valid JSON.
+
 {
   "clips": [
     {
       "start": 0,
       "end": 30,
-      "title": "...",
-      "hook": "...",
-      "topic": "...",
+      "title": "Short title",
+      "hook": "Strong hook",
+      "topic": "Main topic",
       "category": "Insight",
       "patternId": null,
       "hookScore": 95,
@@ -333,238 +886,646 @@ Return JSON matching this schema exactly:
       "completenessScore": 96
     }
   ]
-}`
+}
+`;
 
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      } as Record<string, string>,
-      body: JSON.stringify({
-        model: 'claude-opus-5',
-        max_tokens: 4000,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: prompt
-              }
-            ]
-          }
-        ],
-      }),
-    })
+    const response = await fetch(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: anthropicHeaders,
+        body: JSON.stringify({
+          model:
+            process.env.ANTHROPIC_MODEL ||
+            "claude-opus-4-1",
+          max_tokens: 4000,
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+        }),
+      },
+    );
 
-    if (res.ok) {
-      const json = await res.json()
-      // Extract text from Claude's response format
-      const textContent = json.content?.[0]?.text || '{}'
-      const parsed = JSON.parse(textContent)
-      if (Array.isArray(parsed.clips) && parsed.clips.length > 0) {
-        const patternMap = new Map(patterns.map((p) => [p.id, p]))
-        return parsed.clips
-          .filter((c: any) => c.end > c.start && c.start < duration)
-          .slice(0, targetCount)
-          .map((c: any) => {
-            const pattern = c.patternId ? (patternMap.get(c.patternId) ?? null) : null
-            const patternScore = pattern?.score ?? 50
-            const score =
-              (c.hookScore || 90) * 0.3 +
-              (c.engagementScore || 90) * 0.3 +
-              patternScore * 0.2 +
-              (c.shareabilityScore || 90) * 0.2
-            return {
-              start: Math.max(0, Number(c.start)),
-              end: Math.min(duration, Number(c.end)),
-              title: String(c.title || `Viral Moment from ${title.slice(0, 30)}`),
-              hook: String(c.hook || 'Watch till the end to see this breakdown...'),
-              topic: String(c.topic || title),
-              category: String(c.category || 'Insight'),
-              patternId: pattern?.id ?? null,
-              patternName: pattern?.name ?? null,
-              patternScore,
-              hookScore: c.hookScore || 90,
-              engagementScore: c.engagementScore || 90,
-              emotionalScore: c.emotionalScore || 85,
-              shareabilityScore: c.shareabilityScore || 90,
-              completenessScore: c.completenessScore || 95,
-              score,
-            }
-          })
-      }
+    if (!response.ok) {
+      const errorText =
+        await response.text();
+
+      console.warn(
+        `Claude returned ${response.status}: ${errorText}`,
+      );
+
+      return createFallbackCandidates(
+        title,
+        duration,
+        targetCount,
+      );
     }
-  } catch (err: any) {
-    console.warn(`  Claude Opus 5 candidate generation notice: ${err.message}`)
+
+    const json =
+      (await response.json()) as any;
+
+    const text =
+      json.content?.[0]?.text || "";
+
+    if (!text) {
+      console.warn(
+        "Claude returned empty content.",
+      );
+
+      return createFallbackCandidates(
+        title,
+        duration,
+        targetCount,
+      );
+    }
+
+    // Claude sometimes wraps JSON in ```json blocks.
+    const cleanedText =
+      text
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+
+    const parsed =
+      JSON.parse(cleanedText);
+
+    if (
+      !Array.isArray(parsed.clips) ||
+      parsed.clips.length === 0
+    ) {
+      return createFallbackCandidates(
+        title,
+        duration,
+        targetCount,
+      );
+    }
+
+    const patternMap =
+      new Map(
+        patterns.map(
+          (pattern) => [
+            pattern.id,
+            pattern,
+          ],
+        ),
+      );
+
+    const candidates =
+      parsed.clips
+        .filter((clip: any) => {
+          const start =
+            Number(clip.start);
+
+          const end =
+            Number(clip.end);
+
+          return (
+            Number.isFinite(start) &&
+            Number.isFinite(end) &&
+            end > start &&
+            start >= 0 &&
+            start < duration
+          );
+        })
+        .slice(0, targetCount)
+        .map((clip: any) => {
+          const start = Math.max(
+            0,
+            Number(clip.start),
+          );
+
+          const end = Math.min(
+            duration,
+            Number(clip.end),
+          );
+
+          const pattern =
+            clip.patternId
+              ? patternMap.get(
+                  String(
+                    clip.patternId,
+                  ),
+                ) ?? null
+              : null;
+
+          const patternScore =
+            pattern?.score ?? 50;
+
+          const hookScore =
+            Number(clip.hookScore) || 90;
+
+          const engagementScore =
+            Number(
+              clip.engagementScore,
+            ) || 90;
+
+          const emotionalScore =
+            Number(
+              clip.emotionalScore,
+            ) || 85;
+
+          const shareabilityScore =
+            Number(
+              clip.shareabilityScore,
+            ) || 90;
+
+          const completenessScore =
+            Number(
+              clip.completenessScore,
+            ) || 95;
+
+          const score =
+            hookScore * 0.3 +
+            engagementScore * 0.3 +
+            patternScore * 0.2 +
+            shareabilityScore * 0.2;
+
+          return {
+            start,
+            end,
+
+            title: String(
+              clip.title ||
+                `Viral Moment ${title.slice(
+                  0,
+                  30,
+                )}`,
+            ),
+
+            hook: String(
+              clip.hook ||
+                "Watch until the end.",
+            ),
+
+            topic: String(
+              clip.topic || title,
+            ),
+
+            category: String(
+              clip.category ||
+                "Insight",
+            ),
+
+            patternId:
+              pattern?.id ?? null,
+
+            patternName:
+              pattern?.name ?? null,
+
+            patternScore,
+            hookScore,
+            engagementScore,
+            emotionalScore,
+            shareabilityScore,
+            completenessScore,
+            score,
+          };
+        });
+
+    if (candidates.length > 0) {
+      return candidates;
+    }
+  } catch (error) {
+    console.warn(
+      "Claude candidate generation failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+    );
   }
 
-  // Fallback: Smart distributed timestamps
-  const fallbackCandidates: Candidate[] = []
-  const clipLen = 30
-  const step = Math.max(clipLen + 5, Math.floor(duration / targetCount))
-  for (let i = 0; i < targetCount; i++) {
-    const start = Math.min(Math.max(0, duration - clipLen), i * step)
-    const end = Math.min(duration, start + clipLen)
-    fallbackCandidates.push({
+  return createFallbackCandidates(
+    title,
+    duration,
+    targetCount,
+  );
+}
+
+// ============================================================================
+// FALLBACK CANDIDATES
+// ============================================================================
+
+function createFallbackCandidates(
+  title: string,
+  duration: number,
+  targetCount: number,
+): Candidate[] {
+  const fallback: Candidate[] = [];
+
+  const clipLength =
+    Math.min(30, Math.max(3, duration));
+
+  const step = Math.max(
+    clipLength + 5,
+    Math.floor(
+      duration /
+        Math.max(targetCount, 1),
+    ),
+  );
+
+  for (
+    let index = 0;
+    index < targetCount;
+    index++
+  ) {
+    const start = Math.min(
+      Math.max(0, duration - clipLength),
+      index * step,
+    );
+
+    const end = Math.min(
+      duration,
+      start + clipLength,
+    );
+
+    if (end <= start) {
+      continue;
+    }
+
+    fallback.push({
       start,
       end,
-      title: `Key Highlight Part ${i + 1}`,
-      hook: `Part ${i + 1}: The most essential part of ${title.slice(0, 25)}`,
+
+      title:
+        `Key Highlight Part ${
+          index + 1
+        }`,
+
+      hook:
+        `Part ${
+          index + 1
+        }: The most important moment.`,
+
       topic: title,
-      category: 'Highlight',
+
+      category: "Highlight",
+
       patternId: null,
       patternName: null,
+
       patternScore: 80,
       hookScore: 92,
       engagementScore: 90,
       emotionalScore: 88,
       shareabilityScore: 91,
       completenessScore: 95,
+
       score: 91,
-    })
+    });
   }
-  return fallbackCandidates
+
+  return fallback;
 }
 
-// 3. Slice the video segment FIRST with FFmpeg (into 9:16 vertical MP4)
+// ============================================================================
+// FFmpeg — INTERMEDIATE CLIP SOURCE
+// ============================================================================
+//
+// IMPORTANT:
+// This does NOT create the final render.
+// Remotion creates the final video.
+//
+// ============================================================================
+
 async function sliceClipVideo(
   sourcePath: string,
   start: number,
   end: number,
   outPath: string,
 ): Promise<string> {
-  const duration = Math.max(3, end - start)
-  console.log(`  Slicing clip video (${start.toFixed(1)}s -> ${end.toFixed(1)}s, ${duration.toFixed(1)}s)...`)
+  const duration = Math.max(
+    3,
+    end - start,
+  );
 
-  // Crop & scale to 9:16 (1080x1920) center crop
-  await execFileAsync('ffmpeg', [
-    '-y',
-    '-ss',
-    String(start),
-    '-t',
-    String(duration),
-    '-i',
-    sourcePath,
-    '-vf',
-    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'fast',
-    '-crf',
-    '23',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '192k',
-    outPath,
-  ])
-  return outPath
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+
+      "-ss",
+      String(start),
+
+      "-t",
+      String(duration),
+
+      "-i",
+      sourcePath,
+
+      "-vf",
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+
+      "-c:v",
+      "libx264",
+
+      "-preset",
+      "fast",
+
+      "-crf",
+      "23",
+
+      "-c:a",
+      "aac",
+
+      "-b:a",
+      "192k",
+
+      outPath,
+    ],
+  );
+
+  return outPath;
 }
 
-// 4. Extract audio from ONLY the short 30s clipped video
+// ============================================================================
+// AUDIO EXTRACTION
+// ============================================================================
+
 async function extractClipAudio(
   clipVideoPath: string,
   outAudioPath: string,
 ): Promise<string> {
-  await execFileAsync('ffmpeg', [
-    '-y',
-    '-i',
-    clipVideoPath,
-    '-vn',
-    '-ac',
-    '1',
-    '-ar',
-    '16000',
-    '-b:a',
-    '64k',
-    outAudioPath,
-  ])
-  return outAudioPath
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+
+      "-i",
+      clipVideoPath,
+
+      "-vn",
+
+      "-ac",
+      "1",
+
+      "-ar",
+      "16000",
+
+      "-b:a",
+      "64k",
+
+      outAudioPath,
+    ],
+  );
+
+  return outAudioPath;
 }
 
-// 5. Transcribe ONLY the short clipped audio with OpenAI Whisper (Exact 0.0s - 30.0s timestamps)
+// ============================================================================
+// WHISPER
+// ============================================================================
+
 async function transcribeClippedAudio(
   clipAudioPath: string,
-): Promise<{ words: CaptionWordConfig[]; text: string }> {
-  console.log(`  Running Whisper transcription on the short clipped video...`)
-  if (!OPENAI_API_KEY) {
-    return { words: [], text: '' }
-  }
-
+): Promise<{
+  words: CaptionWordConfig[];
+  text: string;
+}> {
   try {
-    const form = new FormData()
-    const audioBuffer = readFileSync(clipAudioPath)
-    form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'clip.mp3')
-    form.append('model', 'whisper-1')
-    form.append('response_format', 'verbose_json')
-    form.append('timestamp_granularities[]', 'word')
-    form.append('timestamp_granularities[]', 'segment')
+    const form = new FormData();
 
-    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: form,
-    })
+    const audioBuffer =
+      readFileSync(clipAudioPath);
 
-    if (res.ok) {
-      const data = (await res.json()) as any
-      const words: CaptionWordConfig[] = (data.words ?? []).map((w: any) => ({
-        text: String(w.word || '').trim(),
-        start: Number(w.start.toFixed(2)),
-        end: Number(w.end.toFixed(2)),
-      }))
+    form.append(
+      "file",
+      new Blob(
+        [audioBuffer],
+        {
+          type: "audio/mpeg",
+        },
+      ),
+      "clip.mp3",
+    );
+
+    form.append(
+      "model",
+      "whisper-1",
+    );
+
+    form.append(
+      "response_format",
+      "verbose_json",
+    );
+
+    form.append(
+      "timestamp_granularities[]",
+      "word",
+    );
+
+    form.append(
+      "timestamp_granularities[]",
+      "segment",
+    );
+
+    const response = await fetch(
+      "https://api.openai.com/v1/audio/transcriptions",
+      {
+        method: "POST",
+        headers: openAiHeaders,
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      const errorText =
+        await response.text();
+
+      console.warn(
+        `Whisper returned ${response.status}: ${errorText}`,
+      );
+
       return {
-        words,
-        text: data.text || '',
-      }
+        words: [],
+        text: "",
+      };
     }
-  } catch (err: any) {
-    console.warn(`  Whisper clip transcription notice: ${err.message}`)
+
+    const data =
+      (await response.json()) as any;
+
+    const words: CaptionWordConfig[] =
+      (data.words ?? []).map(
+        (word: any) => ({
+          text: String(
+            word.word || "",
+          ).trim(),
+
+          start: Number(
+            Number(word.start).toFixed(
+              2,
+            ),
+          ),
+
+          end: Number(
+            Number(word.end).toFixed(
+              2,
+            ),
+          ),
+        }),
+      );
+
+    return {
+      words,
+      text: data.text || "",
+    };
+  } catch (error) {
+    console.warn(
+      "Whisper failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+    );
+
+    return {
+      words: [],
+      text: "",
+    };
   }
-  return { words: [], text: '' }
 }
 
-async function findBroll(query: string): Promise<BrollConfigItem | null> {
-  const key = process.env.PEXELS_API_KEY
-  if (!key) return null
+// ============================================================================
+// B-ROLL — PEXELS
+// ============================================================================
+
+async function findBroll(
+  query: string,
+): Promise<BrollConfigItem | null> {
   try {
-    const res = await fetch(
-      `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=1`,
-      { headers: { Authorization: key } },
-    )
-    if (!res.ok) return null
-    const data = (await res.json()) as any
-    const video = data.videos?.[0]
-    const file = video?.video_files?.find((f: any) => f.quality === 'hd') ?? video?.video_files?.[0]
-    if (!file?.link) return null
-    return { videoUrl: file.link, startAt: 0, duration: 3, provider: 'pexels', query }
-  } catch {
-    return null
+    const endpoint =
+      "https://api.pexels.com/videos/search" +
+      `?query=${encodeURIComponent(query)}` +
+      "&orientation=portrait" +
+      "&per_page=1";
+
+    const response = await fetch(
+      endpoint,
+      {
+        method: "GET",
+        headers: pexelsHeaders,
+      },
+    );
+
+    if (!response.ok) {
+      console.warn(
+        `Pexels returned ${response.status}`,
+      );
+
+      return null;
+    }
+
+    const data =
+      (await response.json()) as any;
+
+    const video =
+      data.videos?.[0];
+
+    const file =
+      video?.video_files?.find(
+        (item: any) =>
+          item.quality === "hd",
+      ) ??
+      video?.video_files?.[0];
+
+    if (!file?.link) {
+      return null;
+    }
+
+    return {
+      videoUrl: file.link,
+      startAt: 0,
+      duration: 3,
+      provider: "pexels",
+      query,
+    };
+  } catch (error) {
+    console.warn(
+      "Pexels B-roll search failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+    );
+
+    return null;
   }
 }
 
-async function findMusic(topic: string): Promise<MusicConfig | null> {
-  const clientId = process.env.JAMENDO_CLIENT_ID
-  if (!clientId) return null
+// ============================================================================
+// MUSIC — JAMENDO
+// ============================================================================
+
+async function findMusic(
+  topic: string,
+): Promise<MusicConfig | null> {
   try {
-    const params = new URLSearchParams({
-      client_id: clientId,
-      format: 'json',
-      limit: '1',
-      audioformat: 'mp32',
-      tags: 'instrumental',
-      search: topic,
-    })
-    const res = await fetch(`https://api.jamendo.com/v3.0/tracks/?${params}`)
-    if (!res.ok) return null
-    const data = (await res.json()) as any
-    const track = data.results?.[0]
-    if (!track?.audio) return null
+    const params =
+      new URLSearchParams();
+
+    // IMPORTANT:
+    // JAMENDO_CLIENT_ID must be a real environment variable.
+    params.set(
+      "client_id",
+      JAMENDO_CLIENT_ID,
+    );
+
+    params.set(
+      "format",
+      "json",
+    );
+
+    params.set(
+      "limit",
+      "1",
+    );
+
+    params.set(
+      "audioformat",
+      "mp32",
+    );
+
+    params.set(
+      "tags",
+      "instrumental",
+    );
+
+    params.set(
+      "search",
+      topic,
+    );
+
+    const endpoint =
+      `https://api.jamendo.com/v3.0/tracks/?${params.toString()}`;
+
+    const response =
+      await fetch(endpoint);
+
+    if (!response.ok) {
+      console.warn(
+        `Jamendo returned ${response.status}`,
+      );
+
+      return null;
+    }
+
+    const data =
+      (await response.json()) as any;
+
+    const track =
+      data.results?.[0];
+
+    if (!track?.audio) {
+      console.warn(
+        "Jamendo returned no audio track.",
+      );
+
+      return null;
+    }
+
     return {
       audioUrl: track.audio,
       volume: 0.12,
@@ -572,239 +1533,885 @@ async function findMusic(topic: string): Promise<MusicConfig | null> {
       fadeOut: 1.5,
       trimStart: 0,
       title: track.name,
-    }
-  } catch {
-    return null
+    };
+  } catch (error) {
+    console.warn(
+      "Jamendo music search failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+    );
+
+    return null;
   }
 }
 
-// 6. Master pipeline execution for a project
-async function processProject(project: ProjectRow): Promise<void> {
-  console.log(`\n========================================`)
-  console.log(`Processing Project: ${project.name} (${project.id})`)
-  console.log(`========================================`)
-  const workDir = mkdtempSync(path.join(tmpdir(), 'clipforge-pipeline-'))
+// ============================================================================
+// CREATE RENDER JOB
+// ============================================================================
 
-  try {
-    // 1. Download source video
-    const sourceVideoPath = await downloadSource(project, workDir)
-    const meta = await probeVideo(sourceVideoPath)
-    await supabase
-      .from('videos')
-      .update({ duration: meta.duration, width: meta.width, height: meta.height })
-      .eq('project_id', project.id)
+async function createRenderJob(
+  clipId: string,
+  clipVersionId: string,
+): Promise<string> {
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("render_jobs")
+    .insert({
+      clip_id: clipId,
+      clip_version_id: clipVersionId,
 
-    // 2. Query Claude Opus 5 to find the viral clip timestamps
-    await setStatus(project.id, 'ANALYZING', 35)
-    let patterns: PatternRow[] = []
-    if (project.pattern_set_id) {
-      const { data } = await supabase
-        .from('patterns')
-        .select('id, name, category, start_signal, end_signal, score, keywords, is_active')
-        .eq('pattern_set_id', project.pattern_set_id)
-        .eq('is_active', true)
-      patterns = (data ?? []) as PatternRow[]
+      status: "QUEUED",
+      progress: 0,
+      stage: "QUEUED",
+      error_message: null,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data) {
+    throw new Error(
+      `Failed to create render job: ${
+        error?.message ||
+        "unknown error"
+      }`,
+    );
+  }
+
+  console.log(
+    `  Created render job ${data.id} for clip ${clipId}`,
+  );
+
+  return data.id;
+}
+
+// ============================================================================
+// WAIT FOR REMOTION
+// ============================================================================
+
+async function waitForRemotionRenders(
+  projectId: string,
+): Promise<void> {
+  console.log(
+    `\n  Waiting for Remotion jobs for project ${projectId}...`,
+  );
+
+  await setStatus(
+    projectId,
+    "RENDERING",
+    RENDER_PHASE_START,
+  );
+
+  for (;;) {
+    const result =
+      await syncProjectRenderProgress(
+        projectId,
+      );
+
+    if (result.anyFailed) {
+      throw new Error(
+        "One or more Remotion render jobs failed.",
+      );
     }
 
-    const candidates = await findMomentsWithClaudeOpus5(project, project.name, meta.duration, patterns)
-    console.log(`  Found ${candidates.length} candidate moments.`)
+    if (result.allCompleted) {
+      console.log(
+        `  All ${result.jobs.length} Remotion jobs completed.`,
+      );
 
-    // 3. For each candidate: Slice Video -> Transcribe Sliced Audio -> Upload & Deliver
-    await setStatus(project.id, 'CLIPPING_AND_TRANSCRIBING', 50)
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i]
-      const clipIndex = i + 1
-      console.log(`\n  Processing Clip ${clipIndex}/${candidates.length}: "${candidate.title}"`)
+      return;
+    }
 
-      // A) Create clip entry in database
-      const { data: clip, error: clipError } = await supabase
-        .from('clips')
+    await new Promise<void>(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          RENDER_POLL_INTERVAL_MS,
+        ),
+    );
+  }
+}
+
+// ============================================================================
+// PROCESS PROJECT
+// ============================================================================
+
+async function processProject(
+  project: ProjectRow,
+): Promise<void> {
+  const workDir =
+    mkdtempSync(
+      path.join(
+        tmpdir(),
+        "clipforge-pipeline-",
+      ),
+    );
+
+  try {
+    console.log(
+      "\n========================================",
+    );
+
+    console.log(
+      `Processing Project: ${project.name}`,
+    );
+
+    console.log(
+      `Project ID: ${project.id}`,
+    );
+
+    console.log(
+      "========================================",
+    );
+
+    // ------------------------------------------------------------------------
+    // 1. DOWNLOAD SOURCE
+    // ------------------------------------------------------------------------
+
+    const sourceVideoPath =
+      await downloadSource(
+        project,
+        workDir,
+      );
+
+    const meta =
+      await probeVideo(
+        sourceVideoPath,
+      );
+
+    const {
+      error: videoMetaError,
+    } = await supabase
+      .from("videos")
+      .update({
+        duration: meta.duration,
+        width: meta.width,
+        height: meta.height,
+      })
+      .eq(
+        "project_id",
+        project.id,
+      );
+
+    if (videoMetaError) {
+      console.warn(
+        `Failed to update video metadata: ${videoMetaError.message}`,
+      );
+    }
+
+    console.log(
+      `  Source: ${meta.width}x${meta.height}, ${meta.duration.toFixed(2)}s`,
+    );
+
+    // ------------------------------------------------------------------------
+    // 2. AI ANALYSIS
+    // ------------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "ANALYZING",
+      35,
+    );
+
+    let patterns: PatternRow[] = [];
+
+    if (project.pattern_set_id) {
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("patterns")
+        .select(
+          "id, name, category, start_signal, end_signal, score, keywords, is_active",
+        )
+        .eq(
+          "pattern_set_id",
+          project.pattern_set_id,
+        )
+        .eq(
+          "is_active",
+          true,
+        );
+
+      if (error) {
+        throw new Error(
+          `Failed to load patterns: ${error.message}`,
+        );
+      }
+
+      patterns =
+        (data ?? []) as PatternRow[];
+    }
+
+    const candidates =
+      await findMomentsWithClaude(
+        project,
+        project.name,
+        meta.duration,
+        patterns,
+      );
+
+    console.log(
+      `  Found ${candidates.length} candidates.`,
+    );
+
+    if (candidates.length === 0) {
+      throw new Error(
+        "No clip candidates were generated.",
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. PREPARE CLIPS
+    // ------------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "CLIPPING_AND_TRANSCRIBING",
+      40,
+    );
+
+    const totalCandidates =
+      candidates.length;
+
+    const createdRenderJobs: string[] =
+      [];
+
+    for (
+      let index = 0;
+      index < totalCandidates;
+      index++
+    ) {
+      const candidate =
+        candidates[index];
+
+      const clipNumber =
+        index + 1;
+
+      console.log(
+        `\n  Preparing clip ${clipNumber}/${totalCandidates}: ${candidate.title}`,
+      );
+
+      // ----------------------------------------------------------------------
+      // A. CREATE CLIP
+      // ----------------------------------------------------------------------
+
+      const {
+        data: clip,
+        error: clipError,
+      } = await supabase
+        .from("clips")
         .insert({
           project_id: project.id,
+
           title: candidate.title,
           hook: candidate.hook,
           topic: candidate.topic,
           category: candidate.category,
+
           start_time: candidate.start,
           end_time: candidate.end,
-          duration: candidate.end - candidate.start,
+
+          duration:
+            candidate.end -
+            candidate.start,
+
           score: candidate.score,
-          hook_score: candidate.hookScore,
-          engagement_score: candidate.engagementScore,
-          pattern_score: candidate.patternScore,
-          emotional_score: candidate.emotionalScore,
-          shareability_score: candidate.shareabilityScore,
-          completeness_score: candidate.completenessScore,
-          matched_pattern_id: candidate.patternId,
-          matched_pattern_name: candidate.patternName,
-          status: 'RENDERING',
+
+          hook_score:
+            candidate.hookScore,
+
+          engagement_score:
+            candidate.engagementScore,
+
+          pattern_score:
+            candidate.patternScore,
+
+          emotional_score:
+            candidate.emotionalScore,
+
+          shareability_score:
+            candidate.shareabilityScore,
+
+          completeness_score:
+            candidate.completenessScore,
+
+          matched_pattern_id:
+            candidate.patternId,
+
+          matched_pattern_name:
+            candidate.patternName,
+
+          status: "RENDERING",
         })
-        .select('id')
-        .single()
+        .select("id")
+        .single();
 
-      if (clipError || !clip) {
-        console.error(`  Clip insert failed: ${clipError?.message}`)
-        continue
+      if (
+        clipError ||
+        !clip
+      ) {
+        throw new Error(
+          `Clip insert failed: ${
+            clipError?.message ||
+            "unknown error"
+          }`,
+        );
       }
 
-      // B) Slice the video file FIRST
-      const clipVideoPath = path.join(workDir, `clip_${clip.id}.mp4`)
-      await sliceClipVideo(sourceVideoPath, candidate.start, candidate.end, clipVideoPath)
+      // ----------------------------------------------------------------------
+      // B. CREATE INTERMEDIATE CLIP SOURCE
+      // ----------------------------------------------------------------------
 
-      // C) Extract audio from ONLY this short clip and transcribe with Whisper
-      const clipAudioPath = path.join(workDir, `clip_audio_${clip.id}.mp3`)
-      await extractClipAudio(clipVideoPath, clipAudioPath)
-      const { words: whisperWords } = await transcribeClippedAudio(clipAudioPath)
+      const clipVideoPath =
+        path.join(
+          workDir,
+          `clip_${clip.id}.mp4`,
+        );
 
-      // D) Upload the intermediate clip to Supabase Storage (under sources/intermediate)
-      const intermediateStoragePath = `sources/intermediate/${clip.id}/source.mp4`
-      const { error: intermediateUploadError } = await supabase.storage
-        .from('sources')
-        .upload(intermediateStoragePath, readFileSync(clipVideoPath), {
-          contentType: 'video/mp4',
-          upsert: true,
-        })
-      if (intermediateUploadError) {
-        console.error(`  Intermediate upload failed: ${intermediateUploadError.message}`)
-        // We'll continue and let the worker fail later.
+      await sliceClipVideo(
+        sourceVideoPath,
+        candidate.start,
+        candidate.end,
+        clipVideoPath,
+      );
+
+      // ----------------------------------------------------------------------
+      // C. WHISPER
+      // ----------------------------------------------------------------------
+
+      const clipAudioPath =
+        path.join(
+          workDir,
+          `clip_audio_${clip.id}.mp3`,
+        );
+
+      await extractClipAudio(
+        clipVideoPath,
+        clipAudioPath,
+      );
+
+      const {
+        words: whisperWords,
+      } =
+        await transcribeClippedAudio(
+          clipAudioPath,
+        );
+
+      // ----------------------------------------------------------------------
+      // D. UPLOAD INTERMEDIATE SOURCE
+      // ----------------------------------------------------------------------
+
+      const sourceStoragePath =
+        `projects/${project.id}/intermediate/${clip.id}-source.mp4`;
+
+      const {
+        error: sourceUploadError,
+      } = await supabase.storage
+        .from("sources")
+        .upload(
+          sourceStoragePath,
+          readFileSync(
+            clipVideoPath,
+          ),
+          {
+            contentType:
+              "video/mp4",
+            upsert: true,
+          },
+        );
+
+      if (sourceUploadError) {
+        throw new Error(
+          `Failed to upload clip source: ${sourceUploadError.message}`,
+        );
       }
 
-      // E) Get a signed URL for the intermediate clip (valid for 2 hours)
-      const { data: intermediateSignedUrlData, error: intermediateSignError } = await supabase.storage
-        .from('sources')
-        .createSignedUrl(intermediateStoragePath, 7200) // 2 hours
-      let intermediateSignedUrl: string | null = null
-      if (!intermediateSignError && intermediateSignedUrlData) {
-        intermediateSignedUrl = intermediateSignedUrlData.signedUrl
-      } else {
-        console.error(`  Failed to get signed URL for intermediate clip: ${intermediateSignError?.message}`)
-        // We'll continue and let the worker fail later.
-      }
+      // ----------------------------------------------------------------------
+      // E. B-ROLL / MUSIC
+      // ----------------------------------------------------------------------
 
-      // F) Build configuration JSON for this clip
-      const broll = project.auto_broll ? await findBroll(candidate.topic) : null
-      const music = project.auto_music ? await findMusic(candidate.topic) : null
+      const broll =
+        project.auto_broll
+          ? await findBroll(
+              candidate.topic,
+            )
+          : null;
 
-      const clipConfig: ClipConfiguration = {
-        sourceVideo: intermediateSignedUrl,   // use the signed URL of the intermediate clip
+      const music =
+        project.auto_music
+          ? await findMusic(
+              candidate.topic,
+            )
+          : null;
+
+      // ----------------------------------------------------------------------
+      // F. REMOTION CONFIGURATION
+      // ----------------------------------------------------------------------
+
+      const clipConfig:
+        ClipConfiguration = {
+        sourceVideo:
+          sourceStoragePath,
+
         startTime: 0,
-        endTime: candidate.end - candidate.start,
-        aspectRatio: '9:16',
-        resolution: { width: 1080, height: 1920 },
+
+        endTime:
+          candidate.end -
+          candidate.start,
+
+        aspectRatio: "9:16",
+
+        resolution: {
+          width: 1080,
+          height: 1920,
+        },
+
         speed: 1,
-        crop: { mode: 'smart', x: 0.5, y: 0.5, scale: 1, subject: 'speaker' },
+
+        crop: {
+          mode: "smart",
+          x: 0.5,
+          y: 0.5,
+          scale: 1,
+          subject: "speaker",
+        },
+
         captions: {
           enabled: true,
+
           style: {
-            preset: (project.caption_preset || 'bold') as any,
-            font: 'Inter',
+            preset:
+              (project.caption_preset ||
+                "bold") as any,
+
+            font: "Inter",
             fontSize: 64,
             weight: 800,
-            position: 'bottom',
-            animation: 'pop',
-            highlightColor: '#f97316',
-            textColor: '#ffffff',
+
+            position: "bottom",
+            animation: "pop",
+
+            highlightColor:
+              "#f97316",
+
+            textColor:
+              "#ffffff",
+
             background: null,
-            strokeColor: '#000000',
+
+            strokeColor:
+              "#000000",
+
             strokeWidth: 8,
-            alignment: 'center',
+
+            alignment: "center",
+
             lineSpacing: 1.2,
           },
+
           words: whisperWords,
         },
-        broll: broll ? [{ ...broll, startAt: 1 }] : [],
+
+        broll: broll
+          ? [
+              {
+                ...broll,
+                startAt: 1,
+              },
+            ]
+          : [],
+
         music,
+
         overlays: [],
-        branding: { logoUrl: null, watermarkText: null },
+
+        branding: {
+          logoUrl: null,
+          watermarkText: null,
+        },
+
         voiceVolume: 1,
-      }
+      };
 
-      // G) Save Version 1 with configuration (status QUEUED, waiting for render)
-      const { data: version } = await supabase
-        .from('clip_versions')
+      // ----------------------------------------------------------------------
+      // G. CREATE QUEUED CLIP VERSION
+      // ----------------------------------------------------------------------
+
+      const {
+        data: version,
+        error: versionError,
+      } = await supabase
+        .from("clip_versions")
         .insert({
           clip_id: clip.id,
+
           version_number: 1,
-          configuration_json: clipConfig,
-          render_url: null,   // no render URL yet
-          status: 'QUEUED',   // waiting for render
-        })
-        .select('id')
-        .single()
 
-      if (!version) {
-        console.error(`  Failed to create clip version for clip ${clip.id}`)
-        continue
+          configuration_json:
+            clipConfig,
+
+          render_url: null,
+          thumbnail_url: null,
+
+          status: "QUEUED",
+        })
+        .select("id")
+        .single();
+
+      if (
+        versionError ||
+        !version
+      ) {
+        throw new Error(
+          `Failed to create clip version: ${
+            versionError?.message ||
+            "unknown error"
+          }`,
+        );
       }
 
-      // H) Create a render job for this clip version
-      const { data: renderJob, error: renderJobError } = await supabase
-        .from('render_jobs')
-        .insert({
-          clip_id: clip.id,
-          clip_version_id: version.id,
-          status: 'QUEUED',
-          progress: 0,
-          stage: 'QUEUED',
-        })
-        .select('id')
-        .single()
+      // ----------------------------------------------------------------------
+      // H. CREATE QUEUED REMOTION JOB
+      // ----------------------------------------------------------------------
 
-      if (renderJobError || !renderJob) {
-        console.error(`  Failed to create render job for clip ${clip.id}: ${renderJobError?.message}`)
-        // We'll continue and let the worker fail later.
+      const renderJobId =
+        await createRenderJob(
+          clip.id,
+          version.id,
+        );
+
+      createdRenderJobs.push(
+        renderJobId,
+      );
+
+      // ----------------------------------------------------------------------
+      // I. CLIP WAITING FOR REMOTION
+      // ----------------------------------------------------------------------
+
+      const {
+        error: clipWaitingError,
+      } = await supabase
+        .from("clips")
+        .update({
+          status: "RENDERING",
+        })
+        .eq(
+          "id",
+          clip.id,
+        );
+
+      if (clipWaitingError) {
+        throw new Error(
+          `Failed to update clip render state: ${clipWaitingError.message}`,
+        );
       }
 
-      console.log(`  ✓ Clip ${clipIndex} prepared for Remotion rendering.`)
+      // ----------------------------------------------------------------------
+      // J. PREPARATION PROGRESS
+      // ----------------------------------------------------------------------
+
+      const preparationProgress =
+        40 +
+        ((index + 1) /
+          totalCandidates) *
+          20;
+
+      await setStatus(
+        project.id,
+        "PREPARING_RENDERS",
+        preparationProgress,
+      );
     }
-        await setStatus(project.id, 'RENDERING', 0)
-    console.log(`\nProject ${project.id} completed successfully! All clips are clipped, transcribed & ready on the frontend.`)
-  } catch (err: any) {
-    console.error(`Project ${project.id} failed:`, err.message)
-    await setStatus(project.id, 'FAILED', 0, err.message)
+
+    // ------------------------------------------------------------------------
+    // 4. VERIFY JOBS
+    // ------------------------------------------------------------------------
+
+    if (
+      createdRenderJobs.length === 0
+    ) {
+      throw new Error(
+        "No Remotion render jobs were created.",
+      );
+    }
+
+    console.log(
+      `\n  Created ${createdRenderJobs.length} Remotion render jobs.`,
+    );
+
+    // ------------------------------------------------------------------------
+    // 5. HAND OFF TO REMOTION
+    // ------------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "RENDERING",
+      RENDER_PHASE_START,
+    );
+
+    // ------------------------------------------------------------------------
+    // 6. WAIT FOR REAL REMOTION PROGRESS
+    // ------------------------------------------------------------------------
+
+    await waitForRemotionRenders(
+      project.id,
+    );
+
+    // ------------------------------------------------------------------------
+    // 7. FINAL RENDER JOB VERIFICATION
+    // ------------------------------------------------------------------------
+
+    const finalState =
+      await syncProjectRenderProgress(
+        project.id,
+      );
+
+    if (finalState.anyFailed) {
+      throw new Error(
+        "At least one Remotion render job failed.",
+      );
+    }
+
+    if (
+      !finalState.allCompleted
+    ) {
+      throw new Error(
+        "Project attempted to complete before all render jobs were completed.",
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. VERIFY FINAL REMOTION OUTPUT
+    // ------------------------------------------------------------------------
+
+    const {
+      data: finalClips,
+      error: finalClipsError,
+    } = await supabase
+      .from("clips")
+      .select(
+        `
+          id,
+          status,
+          current_render_url,
+          current_thumbnail_url,
+          current_version_id
+        `,
+      )
+      .eq(
+        "project_id",
+        project.id,
+      );
+
+    if (finalClipsError) {
+      throw new Error(
+        `Failed to verify final clips: ${finalClipsError.message}`,
+      );
+    }
+
+    if (
+      !finalClips ||
+      finalClips.length === 0
+    ) {
+      throw new Error(
+        "Project has no final clips.",
+      );
+    }
+
+    const invalidClips =
+      finalClips.filter(
+        (clip: any) =>
+          clip.status !==
+            "RENDERED" ||
+          !clip.current_render_url ||
+          !clip.current_version_id,
+      );
+
+    if (
+      invalidClips.length > 0
+    ) {
+      throw new Error(
+        `${invalidClips.length} clips are missing their final Remotion output.`,
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // 9. ONLY NOW COMPLETE PROJECT
+    // ------------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "COMPLETED",
+      100,
+      null,
+    );
+
+    console.log(
+      `\nProject ${project.id} completed.`,
+    );
+
+    console.log(
+      `${finalClips.length} final Remotion clips verified.`,
+    );
+
+    console.log(
+      "Project progress = 100%.",
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    console.error(
+      `\nProject ${project.id} failed:`,
+      message,
+    );
+
+    await setStatus(
+      project.id,
+      "FAILED",
+      0,
+      message,
+    );
   } finally {
-    rmSync(workDir, { recursive: true, force: true })
+    rmSync(
+      workDir,
+      {
+        recursive: true,
+        force: true,
+      },
+    );
   }
 }
 
-// Polling loop
-async function claimNextProject(): Promise<ProjectRow | null> {
-  const { data, error } = await supabase
-    .from('projects')
-    .select('*')
-    .eq('status', 'QUEUED')
-    .order('created_at', { ascending: true })
+// ============================================================================
+// CLAIM NEXT PROJECT
+// ============================================================================
+
+async function claimNextProject():
+  Promise<ProjectRow | null> {
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("projects")
+    .select("*")
+    .eq(
+      "status",
+      "QUEUED",
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      },
+    )
     .limit(1)
-    .maybeSingle()
+    .maybeSingle();
 
-  if (error || !data) return null
+  if (error) {
+    console.error(
+      "Failed to find queued project:",
+      error.message,
+    );
 
-  const { data: claimed, error: claimError } = await supabase
-    .from('projects')
-    .update({ status: 'DOWNLOADING' })
-    .eq('id', data.id)
-    .eq('status', 'QUEUED')
-    .select('*')
-    .maybeSingle()
+    return null;
+  }
 
-  if (claimError || !claimed) return null
-  return claimed as ProjectRow
+  if (!data) {
+    return null;
+  }
+
+  // Optimistic claim.
+  //
+  // Only one pipeline process should be able
+  // to change QUEUED -> DOWNLOADING.
+
+  const {
+    data: claimed,
+    error: claimError,
+  } = await supabase
+    .from("projects")
+    .update({
+      status: "DOWNLOADING",
+      progress: 0,
+      error_message: null,
+    })
+    .eq(
+      "id",
+      data.id,
+    )
+    .eq(
+      "status",
+      "QUEUED",
+    )
+    .select("*")
+    .maybeSingle();
+
+  if (
+    claimError ||
+    !claimed
+  ) {
+    return null;
+  }
+
+  return claimed as ProjectRow;
 }
+
+// ============================================================================
+// MAIN WORKER LOOP
+// ============================================================================
 
 async function main(): Promise<void> {
-  console.log('ClipForge video-first pipeline worker active. Polling for QUEUED projects...')
+  console.log(
+    "ClipForge pipeline worker active.",
+  );
+
+  console.log(
+    "Waiting for QUEUED projects...",
+  );
+
+  console.log(
+    "IMPORTANT: run the Remotion worker separately with:",
+  );
+
+  console.log(
+    "  npm run worker",
+  );
+
   for (;;) {
     try {
-      const project = await claimNextProject()
+      const project =
+        await claimNextProject();
+
       if (project) {
-        await processProject(project)
-        continue
+        await processProject(
+          project,
+        );
+
+        continue;
       }
-    } catch (err) {
-      console.error('Pipeline error:', err)
+    } catch (error) {
+      console.error(
+        "Pipeline worker error:",
+        error instanceof Error
+          ? error.message
+          : String(error),
+      );
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+
+    await new Promise<void>(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          POLL_INTERVAL_MS,
+        ),
+    );
   }
 }
 
-void main()
+void main();
