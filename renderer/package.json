@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "studio": "remotion studio src/index.ts",
-    "worker": "tsx worker.ts",
+    "worker": "tsx sourceRepair.ts",
+    "worker:raw": "tsx worker.ts",
     "pipeline": "tsx pipeline.ts",
     "typecheck": "tsc --noEmit"
   },
