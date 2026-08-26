@@ -1,6 +1,5 @@
 const DEFAULT_RAPIDAPI_KEY =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RAPIDAPI_KEY) ||
-  'a3a4ab9b9bmsh25a10436c2edfc5p1b7021jsn8a7c6f7f0e54'
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RAPIDAPI_KEY) || ''
 const DEFAULT_RAPIDAPI_HOST =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RAPIDAPI_HOST) ||
   'youtube-media-downloader.p.rapidapi.com'
@@ -24,16 +23,23 @@ export function extractYoutubeId(urlOrId?: string | null): string | null {
   return match ? match[1] : null
 }
 
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim()
+}
+
 export async function resolveYoutubeStream(urlOrId: string): Promise<YoutubeStreamInfo | null> {
   const videoId = extractYoutubeId(urlOrId)
   if (!videoId) return null
 
-  if (cache.has(videoId)) {
-    return cache.get(videoId)!
+  if (cache.has(videoId)) return cache.get(videoId)!
+
+  if (!DEFAULT_RAPIDAPI_KEY) {
+    console.warn('VITE_RAPIDAPI_KEY is not configured; YouTube stream resolution skipped.')
+    return null
   }
 
   try {
-    const res = await fetch(`https://${DEFAULT_RAPIDAPI_HOST}/v2/video/details?videoId=${videoId}`, {
+    const res = await fetch(`https://${DEFAULT_RAPIDAPI_HOST}/v2/video/details?videoId=${encodeURIComponent(videoId)}`, {
       headers: {
         'x-rapidapi-key': DEFAULT_RAPIDAPI_KEY,
         'x-rapidapi-host': DEFAULT_RAPIDAPI_HOST,
@@ -49,32 +55,18 @@ export async function resolveYoutubeStream(urlOrId: string): Promise<YoutubeStre
     const videoItems = Array.isArray(data.videos?.items) ? data.videos.items : []
     const audioItems = Array.isArray(data.audios?.items) ? data.audios.items : []
 
-    // 1. Prioritize clean English/original audio stream
-    const audioTrackList = audioItems.map((a: any) => {
-      const url: string = a.url || ''
-      const matchLang = url.match(/lang%3D([a-zA-Z-]+)/i) || url.match(/lang=([a-zA-Z-]+)/i)
-      const lang = matchLang ? matchLang[1].toLowerCase() : ''
-      const isOriginal = url.includes('acont%3Doriginal') || url.includes('acont=original')
-      const isDubbed = url.includes('acont%3Ddubbed') || url.includes('acont=dubbed')
-      const isM4a = a.mimeType?.includes('mp4') || a.extension === 'm4a'
-      const isEn = lang.startsWith('en') || (!lang && !isDubbed)
-      return {
-        ...a,
-        lang,
-        isOriginal,
-        isDubbed,
-        isM4a,
-        isEn,
-      }
-    })
+    const audioTrackList = audioItems
+      .map((a: any) => {
+        const url = String(a.url || '')
+        const matchLang = url.match(/lang%3D([a-zA-Z-]+)/i) || url.match(/lang=([a-zA-Z-]+)/i)
+        const lang = matchLang ? matchLang[1].toLowerCase() : ''
+        const isOriginal = url.includes('acont%3Doriginal') || url.includes('acont=original')
+        const isDubbed = url.includes('acont%3Ddubbed') || url.includes('acont=dubbed')
+        const isM4a = String(a.mimeType || '').includes('mp4') || a.extension === 'm4a'
+        const isEn = lang.startsWith('en') || (!lang && !isDubbed)
+        return { ...a, lang, isOriginal, isDubbed, isM4a, isEn }
+      })
 
-    // Best audio selection hierarchy:
-    // 1. English + Original + MP4/M4A
-    // 2. English + Original
-    // 3. English (any) + NOT dubbed
-    // 4. Any Original (non-dubbed)
-    // 5. English dubbed (if original wasn't english)
-    // 6. MP4/M4A non-dubbed
     const bestAudioTrack =
       audioTrackList.find((a: any) => a.isEn && a.isOriginal && a.isM4a) ||
       audioTrackList.find((a: any) => a.isEn && a.isOriginal) ||
@@ -85,19 +77,25 @@ export async function resolveYoutubeStream(urlOrId: string): Promise<YoutubeStre
       audioTrackList.find((a: any) => !a.isDubbed) ||
       audioTrackList[0]
 
-    // 2. Find best video with audio (prefer 720p/1080p MP4)
+    const usableVideos = videoItems.filter((v: any) => typeof v?.url === 'string' && v.url.trim().length > 0)
     const directVideoWithAudio =
-      videoItems.find((v: any) => v.url && v.hasAudio === true && (v.quality === '720p' || v.quality === '1080p')) ||
-      videoItems.find((v: any) => v.url && v.hasAudio === true) ||
-      videoItems[0]
+      usableVideos.find((v: any) => v.hasAudio === true && (v.quality === '720p' || v.quality === '1080p')) ||
+      usableVideos.find((v: any) => v.hasAudio === true) ||
+      usableVideos[0]
 
-    const directAudio = bestAudioTrack?.url || directVideoWithAudio?.url
+    const videoUrl = firstString(directVideoWithAudio?.url)
+    const audioUrl = firstString(bestAudioTrack?.url, directVideoWithAudio?.url)
+
+    if (!videoUrl) {
+      console.warn(`RapidAPI returned no usable video URL for YouTube video ${videoId}`)
+      return null
+    }
 
     const info: YoutubeStreamInfo = {
       videoId,
       title: data.title,
-      videoUrl: directVideoWithAudio?.url,
-      audioUrl: directAudio,
+      videoUrl,
+      audioUrl,
       thumbnailUrl: data.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
       durationSeconds: Number(data.lengthSeconds) || 300,
     }
