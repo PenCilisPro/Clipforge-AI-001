@@ -42,19 +42,6 @@ export default function ProjectDetail() {
     setTranscript(t.data as Transcript | null)
     const clipsData = (c.data as Clip[]) ?? []
     setClips(clipsData)
-    // Fetch active render job for any of the project's clips
-    const clipIds = clipsData.map(clip => clip.id)
-    let activeJob: RenderJob | null = null
-    if (clipIds.length > 0) {
-      const { data: renderJobs } = await supabase
-        .from('render_jobs')
-        .select('*')
-        .in('clip_id', clipIds)
-        .in('status', ['QUEUED','PREPARING','RENDERING','UPLOADING'])
-        .order('created_at', { ascending: false })
-        .limit(1)
-      activeJob = renderJobs?.[0] ?? null
-    }
   }, [projectId])
 
   useEffect(() => {
