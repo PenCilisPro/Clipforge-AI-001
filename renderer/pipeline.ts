@@ -1,7 +1,7 @@
 // ClipForge processing pipeline worker.
 //
 // Workflow:
-// 1. Download source video (yt-dlp / RapidAPI / Supabase Storage)
+// 1. Download source video (RapidAPI / Supabase Storage)
 // 2. Claude Opus 5 analyzes video context & duration to detect the best viral clip intervals
 // 3. Remotion / FFmpeg clips the video segment FIRST into an MP4 file
 // 4. OpenAI Whisper transcribes ONLY the short clipped video (word timestamps 0.0s - 30.0s)
@@ -246,27 +246,11 @@ async function downloadSource(project: ProjectRow, workDir: string): Promise<str
     await setStatus(project.id, 'DOWNLOADING', 5)
 
     const videoId = extractYoutubeId(project.source_url)
-    let downloaded = false
+    if (!RAPIDAPI_KEY) throw new Error('Missing RAPIDAPI_KEY for YouTube download.')
+    if (!videoId) throw new Error('Could not extract YouTube video ID.')
 
-    if (RAPIDAPI_KEY && videoId) {
-      downloaded = await downloadViaRapidApi(project.source_url, videoId, outPath)
-    }
-
-    if (!downloaded) {
-      await execFileAsync(
-        'yt-dlp',
-        [
-          '-f',
-          'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          '--merge-output-format',
-          'mp4',
-          '-o',
-          outPath,
-          project.source_url,
-        ],
-        { maxBuffer: 64 * 1024 * 1024 },
-      )
-    }
+    const success = await downloadViaRapidApi(project.source_url, videoId, outPath)
+    if (!success) throw new Error('RapidAPI download failed.')
 
     // Upload the source into storage so re-renders never re-download.
     const storagePath = `projects/${project.id}/source/source.mp4`
