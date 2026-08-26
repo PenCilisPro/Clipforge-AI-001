@@ -49,7 +49,7 @@ const PIPELINE_STEPS: ProgressStep[] = [
   {
     id: 'analyze',
     label: 'Viral Pattern Analysis',
-    description: 'Evaluating hooks & retention scores with GPT-4o',
+    description: 'Evaluating hooks & retention scores',
     icon: Sparkles,
     matchStatuses: ['ANALYZING', 'MATCHING_PATTERNS', 'FINDING_CLIPS'],
     minProgress: 75,

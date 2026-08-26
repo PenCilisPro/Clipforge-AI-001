@@ -164,7 +164,7 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
 
     await updateProjectStatus(projectId, 'MATCHING_PATTERNS', 75)
 
-    // Ask AI (OpenRouter / GPT-4o-mini) to detect clips and transcript
+    // Ask AI (OpenRouter / Claude Opus 5) to detect clips and transcript
     const prompt = `You are ClipForge AI, an elite viral video clipping engine.
 Analyze this video:
 Title: "${title}"

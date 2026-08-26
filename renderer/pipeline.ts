@@ -2,7 +2,7 @@
 //
 // Workflow:
 // 1. Download source video (yt-dlp / RapidAPI / Supabase Storage)
-// 2. GPT-4o analyzes video context & duration to detect the best viral clip intervals
+// 2. Claude Opus 5 analyzes video context & duration to detect the best viral clip intervals
 // 3. Remotion / FFmpeg clips the video segment FIRST into an MP4 file
 // 4. OpenAI Whisper transcribes ONLY the short clipped video (word timestamps 0.0s - 30.0s)
 // 5. Final product (video + kinetic captions + b-roll + music) is uploaded to Supabase Storage
@@ -332,7 +332,7 @@ async function probeVideo(
 }
 
 // 2. Claude Opus 5 analyzes video context & structure to find optimal clip intervals without full transcription
-async function findMomentsWithGpt4o(
+async function findMomentsWithClaudeOpus5(
   project: ProjectRow,
   title: string,
   duration: number,
@@ -635,7 +635,7 @@ async function processProject(project: ProjectRow): Promise<void> {
       .update({ duration: meta.duration, width: meta.width, height: meta.height })
       .eq('project_id', project.id)
 
-    // 2. Query GPT-4o to find the viral clip timestamps
+    // 2. Query Claude Opus 5 to find the viral clip timestamps
     await setStatus(project.id, 'ANALYZING', 35)
     let patterns: PatternRow[] = []
     if (project.pattern_set_id) {
@@ -647,7 +647,7 @@ async function processProject(project: ProjectRow): Promise<void> {
       patterns = (data ?? []) as PatternRow[]
     }
 
-    const candidates = await findMomentsWithGpt4o(project, project.name, meta.duration, patterns)
+    const candidates = await findMomentsWithClaudeOpus5(project, project.name, meta.duration, patterns)
     console.log(`  Found ${candidates.length} candidate moments.`)
 
     // 3. For each candidate: Slice Video -> Transcribe Sliced Audio -> Upload & Deliver
