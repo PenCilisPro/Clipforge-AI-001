@@ -141,18 +141,6 @@ export default function ProjectDetail() {
         errorMessage={project.error_message}
       />
 
-      {/* Active Remotion Render Job Progress */}
-      {activeRenderJob && (
-        <div className="card mb-4 p-4">
-          <div className="mb-2 flex items-center justify-between text-sm">
-            <span className="font-medium text-brand-400">
-              {activeRenderJob.stage ?? 'Rendering with Remotion engine…'}
-            </span>
-            <span className="tabular-nums text-zinc-400">{Math.round(activeRenderJob.progress)}%</span>
-          </div>
-          <ProgressBar value={activeRenderJob.progress} />
-        </div>
-      )}
 
       <div className="mb-6 grid gap-6 lg:grid-cols-3">
         <div className="card overflow-hidden lg:col-span-2">
