@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { Film, RefreshCw, Sparkles, Loader2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { processProjectInBrowser } from '@/lib/clientProcessor'
-import type { Project, Video, Transcript, Clip, RenderJob } from '@/lib/types'
+import type { Project, Video, Transcript, Clip } from '@/lib/types'
 import { normalizeClipConfiguration } from '@/lib/types'
 import { formatDuration, formatTimestamp } from '@/lib/format'
 import {
@@ -11,7 +11,6 @@ import {
   StatusBadge,
   LoadingState,
   Modal,
-  ProgressBar,
 } from '@/components/ui'
 import ClipCard from '@/components/ClipCard'
 import { ProcessingProgressTracker } from '@/components/ProcessingProgressTracker'
@@ -29,7 +28,6 @@ export default function ProjectDetail() {
   const [previewClip, setPreviewClip] = useState<Clip | null>(null)
   const [showTranscript, setShowTranscript] = useState(false)
   const [retrying, setRetrying] = useState(false)
-  const [activeRenderJob, setActiveRenderJob] = useState<RenderJob | null>(null)
 
   const loadAll = useCallback(async () => {
     if (!projectId) return
@@ -57,7 +55,6 @@ export default function ProjectDetail() {
         .limit(1)
       activeJob = renderJobs?.[0] ?? null
     }
-    setActiveRenderJob(activeJob)
   }, [projectId])
 
   useEffect(() => {
