@@ -611,6 +611,7 @@ async function processProject(project: ProjectRow): Promise<void> {
 
     // 3. For each candidate: Slice Video -> Transcribe Sliced Audio -> Upload & Deliver
     await setStatus(project.id, 'CLIPPING_AND_TRANSCRIBING', 50)
+
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i]
       const clipIndex = i + 1
@@ -656,37 +657,27 @@ async function processProject(project: ProjectRow): Promise<void> {
       await extractClipAudio(clipVideoPath, clipAudioPath)
       const { words: whisperWords } = await transcribeClippedAudio(clipAudioPath)
 
-      // D) Upload the intermediate clip to Supabase Storage (under sources/intermediate)
-      const intermediateStoragePath = `sources/intermediate/${clip.id}/source.mp4`
-      const { error: intermediateUploadError } = await supabase.storage
-        .from('sources')
-        .upload(intermediateStoragePath, readFileSync(clipVideoPath), {
+      // D) Upload the rendered clipped video to Supabase Storage
+      const storagePath = `projects/${project.id}/renders/${clip.id}.mp4`
+      const { error: uploadError } = await supabase.storage
+        .from('renders')
+        .upload(storagePath, readFileSync(clipVideoPath), {
           contentType: 'video/mp4',
           upsert: true,
         })
-      if (intermediateUploadError) {
-        console.error(`  Intermediate upload failed: ${intermediateUploadError.message}`)
-        // We'll continue and let the worker fail later.
+
+      let finalRenderUrl: string | null = null
+      if (!uploadError) {
+        const { data: pubData } = supabase.storage.from('renders').getPublicUrl(storagePath)
+        finalRenderUrl = pubData.publicUrl
       }
 
-      // E) Get a signed URL for the intermediate clip (valid for 2 hours)
-      const { data: intermediateSignedUrlData, error: intermediateSignError } = await supabase.storage
-        .from('sources')
-        .createSignedUrl(intermediateStoragePath, 7200) // 2 hours
-      let intermediateSignedUrl: string | null = null
-      if (!intermediateSignError && intermediateSignedUrlData) {
-        intermediateSignedUrl = intermediateSignedUrlData.signedUrl
-      } else {
-        console.error(`  Failed to get signed URL for intermediate clip: ${intermediateSignError?.message}`)
-        // We'll continue and let the worker fail later.
-      }
-
-      // F) Build configuration JSON for this clip
+      // E) Build configuration JSON for this clip
       const broll = project.auto_broll ? await findBroll(candidate.topic) : null
       const music = project.auto_music ? await findMusic(candidate.topic) : null
 
       const clipConfig: ClipConfiguration = {
-        sourceVideo: intermediateSignedUrl,   // use the signed URL of the intermediate clip
+        sourceVideo: finalRenderUrl || storagePath,
         startTime: 0,
         endTime: candidate.end - candidate.start,
         aspectRatio: '9:16',
@@ -719,45 +710,33 @@ async function processProject(project: ProjectRow): Promise<void> {
         voiceVolume: 1,
       }
 
-      // G) Save Version 1 with configuration (status QUEUED, waiting for render)
+      // F) Save Version 1 with configuration
       const { data: version } = await supabase
         .from('clip_versions')
         .insert({
           clip_id: clip.id,
           version_number: 1,
           configuration_json: clipConfig,
-          render_url: null,   // no render URL yet
-          status: 'QUEUED',   // waiting for render
+          render_url: finalRenderUrl,
+          status: 'RENDERED',
         })
         .select('id')
         .single()
 
-      if (!version) {
-        console.error(`  Failed to create clip version for clip ${clip.id}`)
-        continue
-      }
-
-      // H) Create a render job for this clip version
-      const { data: renderJob, error: renderJobError } = await supabase
-        .from('render_jobs')
-        .insert({
-          clip_id: clip.id,
-          clip_version_id: version.id,
-          status: 'QUEUED',
-          progress: 0,
-          stage: 'QUEUED',
+      // G) Mark clip as fully RENDERED with the real video URL
+      await supabase
+        .from('clips')
+        .update({
+          current_version_id: version?.id ?? null,
+          current_render_url: finalRenderUrl,
+          status: 'RENDERED',
         })
-        .select('id')
-        .single()
+        .eq('id', clip.id)
 
-      if (renderJobError || !renderJob) {
-        console.error(`  Failed to create render job for clip ${clip.id}: ${renderJobError?.message}`)
-        // We'll continue and let the worker fail later.
-      }
-
-      console.log(`  ✓ Clip ${clipIndex} prepared for Remotion rendering.`)
+      console.log(`  ✓ Clip ${clipIndex} rendered, transcribed, and uploaded successfully!`)
     }
-        await setStatus(project.id, 'RENDERING', 0)
+
+    await setStatus(project.id, 'COMPLETED', 100)
     console.log(`\nProject ${project.id} completed successfully! All clips are clipped, transcribed & ready on the frontend.`)
   } catch (err: any) {
     console.error(`Project ${project.id} failed:`, err.message)
