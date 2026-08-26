@@ -204,22 +204,28 @@ export default function ProjectDetail() {
         </div>
       </div>
 
-      {clips.length === 0 ? (
+      {project.status === 'COMPLETED' ? (
+        clips.length === 0 ? (
+          <div className="card px-6 py-12 text-center text-sm text-zinc-500">
+            Your AI-generated clips will appear here.
+          </div>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {sortedClips.map((clip) => (
+              <ClipCard
+                key={clip.id}
+                clip={clip}
+                onApprove={(c) => void approveClip(c)}
+                onPreview={setPreviewClip}
+              />
+            ))}
+          </div>
+        )
+      ) : (
         <div className="card px-6 py-12 text-center text-sm text-zinc-500">
           {isProcessing
             ? 'Your AI-generated clips will appear here as processing completes.'
-            : 'Your AI-generated clips will appear here.'}
-        </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {sortedClips.map((clip) => (
-            <ClipCard
-              key={clip.id}
-              clip={clip}
-              onApprove={(c) => void approveClip(c)}
-              onPreview={setPreviewClip}
-            />
-          ))}
+            : 'Processing failed. Please try again.'}
         </div>
       )}
 
