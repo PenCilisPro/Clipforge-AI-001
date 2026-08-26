@@ -362,20 +362,9 @@ Respond ONLY with valid JSON:
 
   if (apiKey) {
     try {
-      const isNvidia = apiKey.startsWith('nvapi-')
-      const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
-
-      const endpoint = isNvidia
-        ? 'https://integrate.api.nvidia.com/v1/chat/completions'
-        : isDirectOpenAi
-          ? 'https://api.openai.com/v1/chat/completions'
-          : 'https://openrouter.ai/api/v1/chat/completions'
-
-      const modelName = isNvidia
-        ? 'meta/llama-3.1-70b-instruct'
-        : isDirectOpenAi
-          ? 'gpt-4o-mini'
-          : 'openai/gpt-4o-mini'
+      // Use OpenRouter with Claude Opus 5 for AI services
+      const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+      const modelName = 'anthropic/claude-opus-5';
 
       const res = await fetch(endpoint, {
         method: 'POST',

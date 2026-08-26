@@ -130,11 +130,15 @@ export default function SettingsPage() {
       <div className="card p-4 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
-            <Sparkles className="h-5 w-5 text-amber-400" /> AI Speech & Whisper Key
+            <Sparkles className="h-5 w-5 text-amber-400" /> AI Key (OpenRouter / Anthropic)
           </h2>
           {aiKey.startsWith('nvapi-') ? (
             <span className="text-xs font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
               <Check className="h-3.5 w-3.5" /> NVIDIA NIM Active
+            </span>
+          ) : aiKey.startsWith('sk-or-') ? (
+            <span className="text-xs font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/30 flex items-center gap-1">
+              <Check className="h-3.5 w-3.5" /> OpenRouter Active
             </span>
           ) : aiKey.startsWith('sk-') ? (
             <span className="text-xs font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/30 flex items-center gap-1">
@@ -143,14 +147,14 @@ export default function SettingsPage() {
           ) : null}
         </div>
         <p className="text-xs text-gray-400">
-          Used by Remotion Clip Studio to generate word-by-word synchronized subtitles and viral B-roll placements.
+          Used by AI services for moment detection, captions, B-roll, and music recommendations.
         </p>
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Key className="absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
             <input
               type="password"
-              placeholder="nvapi-... or sk-..."
+              placeholder="sk-or-v1-... or sk-... or nvapi-..."
               value={aiKey}
               onChange={(e) => handleSaveKey(e.target.value)}
               className="input w-full !pl-9 text-xs font-mono"

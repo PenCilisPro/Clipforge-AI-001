@@ -232,7 +232,7 @@ Return ONLY valid JSON matching this exact structure:
           'X-Title': 'ClipForge AI',
         },
         body: JSON.stringify({
-          model: 'openai/gpt-4o-mini',
+          model: 'anthropic/claude-opus-5',
           response_format: { type: 'json_object' },
           messages: [
             {

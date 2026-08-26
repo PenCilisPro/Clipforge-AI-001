@@ -252,11 +252,20 @@ export async function generateWhisperCaptions({
   // 2. If an audio file slice is available, call official OpenAI or NVIDIA NIM Whisper endpoint
   if (audioFileToTranscribe) {
     try {
-      const isNvidia = apiKey.startsWith('nvapi-')
-      const endpoint = isNvidia
-        ? 'https://integrate.api.nvidia.com/v1/audio/transcriptions'
-        : 'https://api.openai.com/v1/audio/transcriptions'
-      const model = isNvidia ? 'openai/whisper-large-v3-turbo' : 'whisper-1'
+      const isNvidia = apiKey.startsWith('nvapi-');
+      const isOpenRouter = apiKey.startsWith('sk-or-');
+      let endpoint;
+      let model;
+      if (isNvidia) {
+        endpoint = 'https://integrate.api.nvidia.com/v1/audio/transcriptions';
+        model = 'openai/whisper-large-v3-turbo';
+      } else if (isOpenRouter) {
+        endpoint = 'https://openrouter.ai/api/v1/audio/transcriptions';
+        model = 'openai/whisper-1';
+      } else {
+        endpoint = 'https://api.openai.com/v1/audio/transcriptions';
+        model = 'whisper-1';
+      }
 
       const formData = new FormData()
       formData.append('file', audioFileToTranscribe)
@@ -341,17 +350,10 @@ Example JSON output:
     const isNvidia = apiKey.startsWith('nvapi-')
     const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
 
-    const endpoint = isNvidia
-      ? 'https://integrate.api.nvidia.com/v1/chat/completions'
-      : isDirectOpenAi
-        ? 'https://api.openai.com/v1/chat/completions'
-        : 'https://openrouter.ai/api/v1/chat/completions'
-
-    const modelName = isNvidia
-      ? 'meta/llama-3.1-70b-instruct'
-      : isDirectOpenAi
-        ? 'gpt-4o-mini'
-        : 'openai/gpt-4o-mini'
+    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const modelName = 'anthropic/claude-opus-5';
+    // Unused but keep to avoid TS error
+    const _ = isNvidia || isDirectOpenAi;
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -489,25 +491,18 @@ Respond with strict JSON in this format:
     const isNvidia = apiKey.startsWith('nvapi-')
     const isDirectOpenAi = apiKey.startsWith('sk-proj-') || (apiKey.startsWith('sk-') && !apiKey.startsWith('sk-or-'))
 
-    const endpoint = isNvidia
-      ? 'https://integrate.api.nvidia.com/v1/chat/completions'
-      : isDirectOpenAi
-        ? 'https://api.openai.com/v1/chat/completions'
-        : 'https://openrouter.ai/api/v1/chat/completions'
-
-    const modelName = isNvidia
-      ? 'meta/llama-3.1-70b-instruct'
-      : isDirectOpenAi
-        ? 'gpt-4o-mini'
-        : 'openai/gpt-4o-mini'
+    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const modelName = 'anthropic/claude-opus-5';
+    // Unused but keep to avoid TS error
+    const _ = isNvidia || isDirectOpenAi;
 
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
         'HTTP-Referer': 'https://clipforge.app',
-        'X-Title': 'ClipForge AI BRoll',
+        "Content-Type": "application/json",
+        'X-Title': 'ClipForge AI B-Roll',
       },
       body: JSON.stringify({
         model: modelName,

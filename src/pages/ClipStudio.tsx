@@ -540,7 +540,7 @@ export default function ClipStudio() {
         clip,
         transcriptSegments: transcriptData?.segments,
         customApiKey: openAiKey,
-        sourceMediaUrl: config.sourceVideo || undefined,
+        sourceMediaUrl: clip.current_render_url || config.sourceVideo || undefined,
         startTime: config.startTime ?? clip.start_time,
         endTime: config.endTime ?? clip.end_time,
       })
@@ -601,7 +601,7 @@ export default function ClipStudio() {
           clip,
           transcriptSegments: transcriptData?.segments,
           customApiKey: openAiKey,
-          sourceMediaUrl: config.sourceVideo || undefined,
+          sourceMediaUrl: clip.current_render_url || config.sourceVideo || undefined,
           startTime: config.startTime ?? clip.start_time,
           endTime: config.endTime ?? clip.end_time,
         }),
@@ -1075,13 +1075,13 @@ export default function ClipStudio() {
           </div>
 
           <div className="flex w-full flex-1 flex-col items-center justify-center">
-            {activeJob?.stage === 'Rendering with Remotion engine…' ? (
+            {activeJob && activeJob.status !== "COMPLETED" && activeJob.status !== "FAILED" ? (
               <div className="flex h-full items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin" />
                 <p className="mt-2 text-sm text-zinc-400">Rendering your clip...</p>
               </div>
             ) : (
-              previewMode === 'live' || !hasRenderedPreview ? (
+              previewMode === "live" || !hasRenderedPreview ? (
                 <RemotionPlayerPreview
                   config={config}
                   onAddCaptions={() => void handleGenerateCaptions()}
@@ -2314,25 +2314,29 @@ export default function ClipStudio() {
                     <div className="rounded-lg bg-surface-850 p-3.5 border border-surface-700 space-y-3">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
-                          <Key className="h-3.5 w-3.5 text-brand-400" /> Whisper AI API Key
+                          <Key className="h-3.5 w-3.5 text-brand-400" /> AI API Key
                         </label>
                         {openAiKey.startsWith('nvapi-') ? (
                           <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
-                            <Check className="h-3 w-3" /> NVIDIA Whisper NIM Active
+                            <Check className="h-3 w-3" /> NVIDIA NIM Active
+                          </span>
+                        ) : openAiKey.startsWith('sk-or-') ? (
+                          <span className="text-[11px] font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/30 flex items-center gap-1">
+                            <Check className="h-3 w-3" /> OpenRouter Active
                           </span>
                         ) : openAiKey.startsWith('sk-') ? (
                           <span className="text-[11px] font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/30 flex items-center gap-1">
-                            <Check className="h-3 w-3" /> OpenAI Key Active
+                            <Check className="h-3 w-3" /> OpenAI Active
                           </span>
                         ) : null}
                       </div>
                       <p className="text-[11px] text-zinc-400">
-                        Configured with NVIDIA NIM Whisper API & OpenAI. Powers automatic word-by-word synchronized caption generation.
+                        Configured with NVIDIA NIM, OpenAI, or OpenRouter (Anthropic). Powers AI moment detection, captions, B-roll, music recommendations, and Whisper transcription.
                       </p>
                       <div className="flex gap-2">
                         <input
                           type="password"
-                          placeholder="nvapi-... or sk-..."
+                          placeholder="nvapi-... or sk-... or sk-or-v1-..."
                           value={openAiKey}
                           onChange={(e) => handleSaveOpenAiKey(e.target.value)}
                           className="input flex-1 text-xs font-mono"

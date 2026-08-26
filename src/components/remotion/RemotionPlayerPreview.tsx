@@ -38,6 +38,7 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
   const [isOriginalMuted, setIsOriginalMuted] = useState(false)
   const [voiceVolume, setVoiceVolume] = useState<number>(config.voiceover?.volume ?? config.voiceVolume ?? 1)
   const [isVoiceMuted, setIsVoiceMuted] = useState(false)
+  const [isPlayerReady, setIsPlayerReady] = useState(false)
   const [musicVolume, setMusicVolume] = useState<number>(config.music?.volume ?? 0.35)
   const [isMusicMuted, setIsMusicMuted] = useState(false)
 
@@ -147,6 +148,12 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
   return (
     <div className={`flex flex-col items-center w-full ${className}`}>
       <div className="relative aspect-[9/16] w-full max-w-[300px] overflow-hidden rounded-xl border border-surface-750 bg-black shadow-2xl">
+        {!isPlayerReady ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+            <Loader2 className="h-8 w-8 animate-spin" />
+          </div>
+        ) : null}
+
         <Player
           ref={playerRef}
           component={ClipComposition}
@@ -182,6 +189,7 @@ export const RemotionPlayerPreview: React.FC<RemotionPlayerPreviewProps> = ({
           autoPlay={false}
           showVolumeControls
           initialVolume={1}
+          onReady={() => setIsPlayerReady(true)}
         />
 
         {/* Live Remotion Badge */}
