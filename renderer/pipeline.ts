@@ -10,7 +10,7 @@
 // 7. Create clip_versions as QUEUED
 // 8. Create render_jobs as QUEUED
 // 9. Wait for Remotion worker
-// 10. Aggregate render job progress
+// 10. Aggregate ONLY this run's render jobs
 // 11. Complete project only when ALL render jobs are completed
 //
 // Run:
@@ -47,8 +47,7 @@ function requireEnv(name: string): string {
   const value = process.env[name];
 
   if (!value) {
-    console.error(`Missing ${name}.`);
-    process.exit(1);
+    throw new Error(`Missing required environment variable: ${name}`);
   }
 
   return value;
@@ -58,7 +57,6 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-
 const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const ANTHROPIC_API_KEY = requireEnv("ANTHROPIC_API_KEY");
 const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
@@ -69,11 +67,11 @@ const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
 
+const ANTHROPIC_MODEL =
+  process.env.ANTHROPIC_MODEL || "claude-opus-4-1";
+
 // ============================================================================
 // API HEADERS
-//
-// Explicit Record<string, string> prevents TypeScript from complaining
-// about fetch HeadersInit / header values.
 // ============================================================================
 
 const anthropicHeaders: Record<string, string> = {
@@ -116,6 +114,9 @@ const supabase = createClient(
 const POLL_INTERVAL_MS = 5000;
 const RENDER_POLL_INTERVAL_MS = 1500;
 
+const PREPARATION_START = 40;
+const PREPARATION_END = 60;
+
 const RENDER_PHASE_START = 60;
 const RENDER_PHASE_END = 100;
 
@@ -127,12 +128,9 @@ interface ProjectRow {
   id: string;
   user_id: string;
   name: string;
-
   source_type: "youtube" | "upload";
   source_url: string | null;
-
   status: string;
-
   pattern_set_id: string | null;
 
   clip_duration_preset:
@@ -142,10 +140,8 @@ interface ProjectRow {
     | "ai";
 
   max_clips: number;
-
   auto_broll: boolean;
   auto_music: boolean;
-
   caption_preset: string;
   ai_optimization: boolean;
 }
@@ -171,7 +167,6 @@ interface PatternRow {
 interface Candidate {
   start: number;
   end: number;
-
   title: string;
   hook: string;
   topic: string;
@@ -186,7 +181,6 @@ interface Candidate {
   emotionalScore: number;
   shareabilityScore: number;
   completenessScore: number;
-
   score: number;
 }
 
@@ -194,7 +188,6 @@ interface RenderJobRow {
   id: string;
   clip_id: string;
   clip_version_id: string;
-
   status: string;
   progress: number;
   stage: string | null;
@@ -224,6 +217,12 @@ function extractYoutubeId(url: string): string | null {
   return match ? match[1] : null;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 // ============================================================================
 // PROJECT STATUS
 // ============================================================================
@@ -237,7 +236,7 @@ async function setStatus(
   const safeProgress = clampProgress(progress);
 
   console.log(
-    `  [${projectId}] ${status} (${safeProgress}%)`,
+    `[${projectId}] ${status} (${safeProgress}%)`,
   );
 
   const { error } = await supabase
@@ -261,35 +260,14 @@ async function setStatus(
 // RENDER JOBS
 // ============================================================================
 
-async function getProjectRenderJobs(
-  projectId: string,
+async function getRenderJobs(
+  jobIds: string[],
 ): Promise<RenderJobRow[]> {
-  const {
-    data: clips,
-    error: clipsError,
-  } = await supabase
-    .from("clips")
-    .select("id")
-    .eq("project_id", projectId);
-
-  if (clipsError) {
-    throw new Error(
-      `Failed to load project clips: ${clipsError.message}`,
-    );
-  }
-
-  const clipIds = (clips ?? []).map(
-    (clip: { id: string }) => clip.id,
-  );
-
-  if (clipIds.length === 0) {
+  if (jobIds.length === 0) {
     return [];
   }
 
-  const {
-    data: jobs,
-    error: jobsError,
-  } = await supabase
+  const { data, error } = await supabase
     .from("render_jobs")
     .select(
       `
@@ -302,18 +280,15 @@ async function getProjectRenderJobs(
         error_message
       `,
     )
-    .in("clip_id", clipIds)
-    .order("created_at", {
-      ascending: true,
-    });
+    .in("id", jobIds);
 
-  if (jobsError) {
+  if (error) {
     throw new Error(
-      `Failed to load render jobs: ${jobsError.message}`,
+      `Failed to load render jobs: ${error.message}`,
     );
   }
 
-  return (jobs ?? []) as RenderJobRow[];
+  return (data ?? []) as RenderJobRow[];
 }
 
 function calculateRenderProgress(
@@ -324,8 +299,17 @@ function calculateRenderProgress(
   }
 
   const total = jobs.reduce(
-    (sum, job) =>
-      sum + Number(job.progress || 0),
+    (sum, job) => {
+      if (job.status === "COMPLETED") {
+        return sum + 100;
+      }
+
+      if (job.status === "FAILED") {
+        return sum;
+      }
+
+      return sum + Number(job.progress || 0);
+    },
     0,
   );
 
@@ -347,6 +331,7 @@ function mapRenderProgressToProjectProgress(
 
 async function syncProjectRenderProgress(
   projectId: string,
+  jobIds: string[],
 ): Promise<{
   jobs: RenderJobRow[];
   renderProgress: number;
@@ -354,8 +339,13 @@ async function syncProjectRenderProgress(
   allCompleted: boolean;
   anyFailed: boolean;
 }> {
-  const jobs =
-    await getProjectRenderJobs(projectId);
+  const jobs = await getRenderJobs(jobIds);
+
+  if (jobs.length !== jobIds.length) {
+    console.warn(
+      `Expected ${jobIds.length} render jobs but found ${jobs.length}.`,
+    );
+  }
 
   if (jobs.length === 0) {
     return {
@@ -371,15 +361,15 @@ async function syncProjectRenderProgress(
     calculateRenderProgress(jobs);
 
   const allCompleted =
-    jobs.length > 0 &&
+    jobs.length === jobIds.length &&
+    jobIds.length > 0 &&
     jobs.every(
       (job) => job.status === "COMPLETED",
     );
 
-  const anyFailed =
-    jobs.some(
-      (job) => job.status === "FAILED",
-    );
+  const anyFailed = jobs.some(
+    (job) => job.status === "FAILED",
+  );
 
   const projectProgress = allCompleted
     ? 100
@@ -387,20 +377,20 @@ async function syncProjectRenderProgress(
         renderProgress,
       );
 
-  const activeStatuses = jobs
-    .map(
-      (job) =>
-        `${job.status}:${job.progress}%`,
-    )
-    .join(", ");
-
   console.log(
-    `  Render progress: ${renderProgress.toFixed(
+    `Render progress: ${renderProgress.toFixed(
       1,
     )}% -> project ${projectProgress}%`,
   );
 
-  console.log(`  Jobs: ${activeStatuses}`);
+  console.log(
+    `Jobs: ${jobs
+      .map(
+        (job) =>
+          `${job.id}:${job.status}:${job.progress}%`,
+      )
+      .join(", ")}`,
+  );
 
   if (anyFailed) {
     const failedJob = jobs.find(
@@ -448,7 +438,7 @@ async function downloadViaRapidApi(
   outPath: string,
 ): Promise<boolean> {
   console.log(
-    `  Attempting YouTube download via RapidAPI (${RAPIDAPI_HOST})...`,
+    `Attempting YouTube download via RapidAPI (${RAPIDAPI_HOST})...`,
   );
 
   try {
@@ -463,67 +453,98 @@ async function downloadViaRapidApi(
 
     if (!response.ok) {
       console.warn(
-        `  RapidAPI returned ${response.status}`,
+        `RapidAPI returned ${response.status}`,
       );
 
       return false;
     }
-
-    let downloadUrl: string | null = null;
 
     const contentType =
       response.headers.get("content-type") || "";
 
-    if (
-      contentType.includes("application/json")
-    ) {
+    let downloadUrl: string | null = null;
+
+    if (contentType.includes("application/json")) {
       const data = (await response.json()) as any;
 
-      if (
+      downloadUrl =
         typeof data.downloadUrl === "string"
-      ) {
-        downloadUrl = data.downloadUrl;
-      } else if (
-        typeof data.download_url === "string"
-      ) {
-        downloadUrl = data.download_url;
-      } else if (
-        typeof data.link === "string"
-      ) {
-        downloadUrl = data.link;
-      } else if (
-        typeof data.url === "string"
-      ) {
-        downloadUrl = data.url;
+          ? data.downloadUrl
+          : typeof data.download_url === "string"
+            ? data.download_url
+            : typeof data.link === "string"
+              ? data.link
+              : typeof data.url === "string"
+                ? data.url
+                : null;
+
+      if (!downloadUrl && data.data) {
+        downloadUrl =
+          typeof data.data.downloadUrl === "string"
+            ? data.data.downloadUrl
+            : typeof data.data.download_url === "string"
+              ? data.data.download_url
+              : typeof data.data.url === "string"
+                ? data.data.url
+                : null;
       }
 
-      // Some download APIs return nested media objects.
-      if (!downloadUrl && data.data) {
-        if (
-          typeof data.data.downloadUrl ===
-          "string"
-        ) {
+      // Some downloader APIs return nested formats.
+      if (!downloadUrl && Array.isArray(data.data)) {
+        const first = data.data[0];
+
+        if (first) {
           downloadUrl =
-            data.data.downloadUrl;
-        } else if (
-          typeof data.data.url === "string"
-        ) {
-          downloadUrl = data.data.url;
+            typeof first.downloadUrl === "string"
+              ? first.downloadUrl
+              : typeof first.download_url === "string"
+                ? first.download_url
+                : typeof first.url === "string"
+                  ? first.url
+                  : null;
         }
       }
+
+      if (!downloadUrl && Array.isArray(data.formats)) {
+        const format =
+          data.formats.find(
+            (item: any) =>
+              typeof item.url === "string" &&
+              (
+                String(item.mimeType || "").includes(
+                  "video",
+                ) ||
+                String(item.mime_type || "").includes(
+                  "video",
+                )
+              ),
+          ) ?? data.formats[0];
+
+        if (format?.url) {
+          downloadUrl = String(format.url);
+        }
+      }
+    } else {
+      const arrayBuffer =
+        await response.arrayBuffer();
+
+      writeFileSync(
+        outPath,
+        Buffer.from(arrayBuffer),
+      );
+
+      return statSync(outPath).size > 0;
     }
 
     if (!downloadUrl) {
       console.warn(
-        "RapidAPI did not provide a download URL.",
+        "RapidAPI did not provide a usable download URL.",
       );
 
       return false;
     }
 
-    console.log(
-      "  Downloading media...",
-    );
+    console.log("Downloading media...");
 
     const mediaResponse =
       await fetch(downloadUrl);
@@ -549,7 +570,7 @@ async function downloadViaRapidApi(
     }
 
     console.log(
-      `  Downloaded ${Math.round(
+      `Downloaded ${Math.round(
         stats.size / 1024 / 1024,
       )} MB`,
     );
@@ -586,13 +607,7 @@ async function downloadSource(
     5,
   );
 
-  // --------------------------------------------------------------------------
-  // YouTube
-  // --------------------------------------------------------------------------
-
-  if (
-    project.source_type === "youtube"
-  ) {
+  if (project.source_type === "youtube") {
     if (!project.source_url) {
       throw new Error(
         "Project has no YouTube URL.",
@@ -600,9 +615,7 @@ async function downloadSource(
     }
 
     const videoId =
-      extractYoutubeId(
-        project.source_url,
-      );
+      extractYoutubeId(project.source_url);
 
     if (!videoId) {
       throw new Error(
@@ -611,7 +624,7 @@ async function downloadSource(
     }
 
     console.log(
-      `  YouTube video ID: ${videoId}`,
+      `YouTube video ID: ${videoId}`,
     );
 
     const success =
@@ -671,10 +684,6 @@ async function downloadSource(
     return outPath;
   }
 
-  // --------------------------------------------------------------------------
-  // Uploaded source
-  // --------------------------------------------------------------------------
-
   const {
     data: video,
     error: videoError,
@@ -715,10 +724,7 @@ async function downloadSource(
         3600,
       );
 
-  if (
-    signError ||
-    !signed
-  ) {
+  if (signError || !signed) {
     throw new Error(
       `Cannot sign source URL: ${
         signError?.message ||
@@ -727,9 +733,8 @@ async function downloadSource(
     );
   }
 
-  const response = await fetch(
-    signed.signedUrl,
-  );
+  const response =
+    await fetch(signed.signedUrl);
 
   if (!response.ok) {
     throw new Error(
@@ -737,9 +742,10 @@ async function downloadSource(
     );
   }
 
-  const bytes = Buffer.from(
-    await response.arrayBuffer(),
-  );
+  const bytes =
+    Buffer.from(
+      await response.arrayBuffer(),
+    );
 
   writeFileSync(
     outPath,
@@ -791,14 +797,23 @@ async function probeVideo(
         stream.codec_type === "video",
     );
 
+  const duration = Number(
+    info.format?.duration || 0,
+  );
+
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
+    throw new Error(
+      "Could not determine source video duration.",
+    );
+  }
+
   return {
-    duration: Number(
-      info.format?.duration || 0,
-    ),
-    width:
-      videoStream?.width ?? 0,
-    height:
-      videoStream?.height ?? 0,
+    duration,
+    width: videoStream?.width ?? 0,
+    height: videoStream?.height ?? 0,
   };
 }
 
@@ -813,18 +828,18 @@ async function findMomentsWithClaude(
   patterns: PatternRow[],
 ): Promise<Candidate[]> {
   const targetCount = Math.min(
-    project.max_clips || 6,
+    Math.max(project.max_clips || 6, 1),
     8,
   );
 
   const durationTarget =
-    project.clip_duration_preset ===
-    "15-30"
+    project.clip_duration_preset === "15-30"
       ? "20-30"
-      : project.clip_duration_preset ===
-          "60-90"
+      : project.clip_duration_preset === "60-90"
         ? "60-90"
-        : "30-55";
+        : project.clip_duration_preset === "ai"
+          ? "30-60"
+          : "30-55";
 
   const patternText =
     patterns.length > 0
@@ -861,13 +876,16 @@ Find the best ${targetCount} moments that could perform well as:
 
 Important:
 - Timestamps must be inside the source video.
+- start must be >= 0.
 - end must be greater than start.
+- end must be <= ${duration}.
 - Prefer complete thoughts.
 - Prefer strong hooks.
 - Avoid starting in the middle of a sentence.
+- Avoid ending in the middle of a thought.
 - Distribute timestamps throughout the video when possible.
-
-Return ONLY valid JSON.
+- Do not invent timestamps outside the video.
+- Return ONLY valid JSON.
 
 {
   "clips": [
@@ -896,9 +914,7 @@ Return ONLY valid JSON.
         method: "POST",
         headers: anthropicHeaders,
         body: JSON.stringify({
-          model:
-            process.env.ANTHROPIC_MODEL ||
-            "claude-opus-4-1",
+          model: ANTHROPIC_MODEL,
           max_tokens: 4000,
           messages: [
             {
@@ -943,12 +959,20 @@ Return ONLY valid JSON.
       );
     }
 
-    // Claude sometimes wraps JSON in ```json blocks.
     const cleanedText =
       text
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "")
+        .replace(
+          /^```json\s*/i,
+          "",
+        )
+        .replace(
+          /^```\s*/i,
+          "",
+        )
+        .replace(
+          /\s*```$/i,
+          "",
+        )
         .trim();
 
     const parsed =
@@ -989,7 +1013,7 @@ Return ONLY valid JSON.
             Number.isFinite(end) &&
             end > start &&
             start >= 0 &&
-            start < duration
+            end <= duration
           );
         })
         .slice(0, targetCount)
@@ -1118,15 +1142,22 @@ function createFallbackCandidates(
   const fallback: Candidate[] = [];
 
   const clipLength =
-    Math.min(30, Math.max(3, duration));
+    Math.min(
+      30,
+      Math.max(3, duration),
+    );
 
-  const step = Math.max(
-    clipLength + 5,
-    Math.floor(
-      duration /
-        Math.max(targetCount, 1),
-    ),
-  );
+  const step =
+    Math.max(
+      clipLength + 5,
+      Math.floor(
+        duration /
+          Math.max(
+            targetCount,
+            1,
+          ),
+      ),
+    );
 
   for (
     let index = 0;
@@ -1134,7 +1165,10 @@ function createFallbackCandidates(
     index++
   ) {
     const start = Math.min(
-      Math.max(0, duration - clipLength),
+      Math.max(
+        0,
+        duration - clipLength,
+      ),
       index * step,
     );
 
@@ -1162,7 +1196,6 @@ function createFallbackCandidates(
         }: The most important moment.`,
 
       topic: title,
-
       category: "Highlight",
 
       patternId: null,
@@ -1185,12 +1218,6 @@ function createFallbackCandidates(
 // ============================================================================
 // FFmpeg — INTERMEDIATE CLIP SOURCE
 // ============================================================================
-//
-// IMPORTANT:
-// This does NOT create the final render.
-// Remotion creates the final video.
-//
-// ============================================================================
 
 async function sliceClipVideo(
   sourcePath: string,
@@ -1198,22 +1225,20 @@ async function sliceClipVideo(
   end: number,
   outPath: string,
 ): Promise<string> {
-  const duration = Math.max(
-    3,
-    end - start,
-  );
+  const duration =
+    Math.max(
+      3,
+      end - start,
+    );
 
   await execFileAsync(
     "ffmpeg",
     [
       "-y",
-
       "-ss",
       String(start),
-
       "-t",
       String(duration),
-
       "-i",
       sourcePath,
 
@@ -1222,16 +1247,13 @@ async function sliceClipVideo(
 
       "-c:v",
       "libx264",
-
       "-preset",
       "fast",
-
       "-crf",
       "23",
 
       "-c:a",
       "aac",
-
       "-b:a",
       "192k",
 
@@ -1254,21 +1276,15 @@ async function extractClipAudio(
     "ffmpeg",
     [
       "-y",
-
       "-i",
       clipVideoPath,
-
       "-vn",
-
       "-ac",
       "1",
-
       "-ar",
       "16000",
-
       "-b:a",
       "64k",
-
       outAudioPath,
     ],
   );
@@ -1290,7 +1306,9 @@ async function transcribeClippedAudio(
     const form = new FormData();
 
     const audioBuffer =
-      readFileSync(clipAudioPath);
+      readFileSync(
+        clipAudioPath,
+      );
 
     form.append(
       "file",
@@ -1323,14 +1341,15 @@ async function transcribeClippedAudio(
       "segment",
     );
 
-    const response = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: openAiHeaders,
-        body: form,
-      },
-    );
+    const response =
+      await fetch(
+        "https://api.openai.com/v1/audio/transcriptions",
+        {
+          method: "POST",
+          headers: openAiHeaders,
+          body: form,
+        },
+      );
 
     if (!response.ok) {
       const errorText =
@@ -1349,7 +1368,8 @@ async function transcribeClippedAudio(
     const data =
       (await response.json()) as any;
 
-    const words: CaptionWordConfig[] =
+    const words:
+      CaptionWordConfig[] =
       (data.words ?? []).map(
         (word: any) => ({
           text: String(
@@ -1357,15 +1377,15 @@ async function transcribeClippedAudio(
           ).trim(),
 
           start: Number(
-            Number(word.start).toFixed(
-              2,
-            ),
+            Number(
+              word.start,
+            ).toFixed(2),
           ),
 
           end: Number(
-            Number(word.end).toFixed(
-              2,
-            ),
+            Number(
+              word.end,
+            ).toFixed(2),
           ),
         }),
       );
@@ -1403,13 +1423,14 @@ async function findBroll(
       "&orientation=portrait" +
       "&per_page=1";
 
-    const response = await fetch(
-      endpoint,
-      {
-        method: "GET",
-        headers: pexelsHeaders,
-      },
-    );
+    const response =
+      await fetch(
+        endpoint,
+        {
+          method: "GET",
+          headers: pexelsHeaders,
+        },
+      );
 
     if (!response.ok) {
       console.warn(
@@ -1466,8 +1487,6 @@ async function findMusic(
     const params =
       new URLSearchParams();
 
-    // IMPORTANT:
-    // JAMENDO_CLIENT_ID must be a real environment variable.
     params.set(
       "client_id",
       JAMENDO_CLIENT_ID,
@@ -1562,7 +1581,6 @@ async function createRenderJob(
     .insert({
       clip_id: clipId,
       clip_version_id: clipVersionId,
-
       status: "QUEUED",
       progress: 0,
       stage: "QUEUED",
@@ -1581,7 +1599,7 @@ async function createRenderJob(
   }
 
   console.log(
-    `  Created render job ${data.id} for clip ${clipId}`,
+    `Created render job ${data.id} for clip ${clipId}`,
   );
 
   return data.id;
@@ -1593,21 +1611,24 @@ async function createRenderJob(
 
 async function waitForRemotionRenders(
   projectId: string,
+  jobIds: string[],
 ): Promise<void> {
   console.log(
-    `\n  Waiting for Remotion jobs for project ${projectId}...`,
+    `Waiting for ${jobIds.length} Remotion jobs for project ${projectId}...`,
   );
 
   await setStatus(
     projectId,
     "RENDERING",
     RENDER_PHASE_START,
+    null,
   );
 
   for (;;) {
     const result =
       await syncProjectRenderProgress(
         projectId,
+        jobIds,
       );
 
     if (result.anyFailed) {
@@ -1618,18 +1639,14 @@ async function waitForRemotionRenders(
 
     if (result.allCompleted) {
       console.log(
-        `  All ${result.jobs.length} Remotion jobs completed.`,
+        `All ${result.jobs.length} Remotion jobs completed.`,
       );
 
       return;
     }
 
-    await new Promise<void>(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          RENDER_POLL_INTERVAL_MS,
-        ),
+    await sleep(
+      RENDER_POLL_INTERVAL_MS,
     );
   }
 }
@@ -1666,9 +1683,9 @@ async function processProject(
       "========================================",
     );
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 1. DOWNLOAD SOURCE
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     const sourceVideoPath =
       await downloadSource(
@@ -1702,17 +1719,20 @@ async function processProject(
     }
 
     console.log(
-      `  Source: ${meta.width}x${meta.height}, ${meta.duration.toFixed(2)}s`,
+      `Source: ${meta.width}x${meta.height}, ${meta.duration.toFixed(
+        2,
+      )}s`,
     );
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 2. AI ANALYSIS
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     await setStatus(
       project.id,
       "ANALYZING",
       35,
+      null,
     );
 
     let patterns: PatternRow[] = [];
@@ -1754,7 +1774,7 @@ async function processProject(
       );
 
     console.log(
-      `  Found ${candidates.length} candidates.`,
+      `Found ${candidates.length} candidates.`,
     );
 
     if (candidates.length === 0) {
@@ -1763,14 +1783,15 @@ async function processProject(
       );
     }
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 3. PREPARE CLIPS
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     await setStatus(
       project.id,
       "CLIPPING_AND_TRANSCRIBING",
-      40,
+      PREPARATION_START,
+      null,
     );
 
     const totalCandidates =
@@ -1791,12 +1812,12 @@ async function processProject(
         index + 1;
 
       console.log(
-        `\n  Preparing clip ${clipNumber}/${totalCandidates}: ${candidate.title}`,
+        `\nPreparing clip ${clipNumber}/${totalCandidates}: ${candidate.title}`,
       );
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // A. CREATE CLIP
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const {
         data: clip,
@@ -1861,9 +1882,9 @@ async function processProject(
         );
       }
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // B. CREATE INTERMEDIATE CLIP SOURCE
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const clipVideoPath =
         path.join(
@@ -1878,9 +1899,9 @@ async function processProject(
         clipVideoPath,
       );
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // C. WHISPER
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const clipAudioPath =
         path.join(
@@ -1900,9 +1921,9 @@ async function processProject(
           clipAudioPath,
         );
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // D. UPLOAD INTERMEDIATE SOURCE
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const sourceStoragePath =
         `projects/${project.id}/intermediate/${clip.id}-source.mp4`;
@@ -1929,9 +1950,9 @@ async function processProject(
         );
       }
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // E. B-ROLL / MUSIC
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const broll =
         project.auto_broll
@@ -1947,9 +1968,9 @@ async function processProject(
             )
           : null;
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // F. REMOTION CONFIGURATION
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const clipConfig:
         ClipConfiguration = {
@@ -1990,7 +2011,6 @@ async function processProject(
             font: "Inter",
             fontSize: 64,
             weight: 800,
-
             position: "bottom",
             animation: "pop",
 
@@ -2008,7 +2028,6 @@ async function processProject(
             strokeWidth: 8,
 
             alignment: "center",
-
             lineSpacing: 1.2,
           },
 
@@ -2036,9 +2055,9 @@ async function processProject(
         voiceVolume: 1,
       };
 
-      // ----------------------------------------------------------------------
-      // G. CREATE QUEUED CLIP VERSION
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
+      // G. CREATE CLIP VERSION
+      // --------------------------------------------------------------------
 
       const {
         data: version,
@@ -2047,7 +2066,6 @@ async function processProject(
         .from("clip_versions")
         .insert({
           clip_id: clip.id,
-
           version_number: 1,
 
           configuration_json:
@@ -2073,9 +2091,9 @@ async function processProject(
         );
       }
 
-      // ----------------------------------------------------------------------
-      // H. CREATE QUEUED REMOTION JOB
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
+      // H. CREATE REMOTION JOB
+      // --------------------------------------------------------------------
 
       const renderJobId =
         await createRenderJob(
@@ -2087,9 +2105,9 @@ async function processProject(
         renderJobId,
       );
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // I. CLIP WAITING FOR REMOTION
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const {
         error: clipWaitingError,
@@ -2109,26 +2127,28 @@ async function processProject(
         );
       }
 
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
       // J. PREPARATION PROGRESS
-      // ----------------------------------------------------------------------
+      // --------------------------------------------------------------------
 
       const preparationProgress =
-        40 +
+        PREPARATION_START +
         ((index + 1) /
           totalCandidates) *
-          20;
+          (PREPARATION_END -
+            PREPARATION_START);
 
       await setStatus(
         project.id,
         "PREPARING_RENDERS",
         preparationProgress,
+        null,
       );
     }
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 4. VERIFY JOBS
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     if (
       createdRenderJobs.length === 0
@@ -2139,34 +2159,37 @@ async function processProject(
     }
 
     console.log(
-      `\n  Created ${createdRenderJobs.length} Remotion render jobs.`,
+      `\nCreated ${createdRenderJobs.length} Remotion render jobs.`,
     );
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 5. HAND OFF TO REMOTION
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     await setStatus(
       project.id,
       "RENDERING",
       RENDER_PHASE_START,
+      null,
     );
 
-    // ------------------------------------------------------------------------
-    // 6. WAIT FOR REAL REMOTION PROGRESS
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
+    // 6. WAIT FOR ONLY THESE REMOTION JOBS
+    // ----------------------------------------------------------------------
 
     await waitForRemotionRenders(
       project.id,
+      createdRenderJobs,
     );
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 7. FINAL RENDER JOB VERIFICATION
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     const finalState =
       await syncProjectRenderProgress(
         project.id,
+        createdRenderJobs,
       );
 
     if (finalState.anyFailed) {
@@ -2183,9 +2206,9 @@ async function processProject(
       );
     }
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 8. VERIFY FINAL REMOTION OUTPUT
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     const {
       data: finalClips,
@@ -2238,9 +2261,9 @@ async function processProject(
       );
     }
 
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
     // 9. ONLY NOW COMPLETE PROJECT
-    // ------------------------------------------------------------------------
+    // ----------------------------------------------------------------------
 
     await setStatus(
       project.id,
@@ -2326,11 +2349,6 @@ async function claimNextProject():
     return null;
   }
 
-  // Optimistic claim.
-  //
-  // Only one pipeline process should be able
-  // to change QUEUED -> DOWNLOADING.
-
   const {
     data: claimed,
     error: claimError,
@@ -2404,12 +2422,8 @@ async function main(): Promise<void> {
       );
     }
 
-    await new Promise<void>(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          POLL_INTERVAL_MS,
-        ),
+    await sleep(
+      POLL_INTERVAL_MS,
     );
   }
 }
