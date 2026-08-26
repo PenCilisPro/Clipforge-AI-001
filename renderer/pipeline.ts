@@ -159,81 +159,50 @@ async function downloadViaRapidApi(
 
   console.log(`  Attempting YouTube download via RapidAPI (${rapidApiHost})...`)
   try {
-    const endpoints = [
-      `https://${rapidApiHost}/v2/video/details?videoId=${videoId}&url=${encodeURIComponent(youtubeUrl)}`,
-      `https://${rapidApiHost}/v2/video/details?url=${encodeURIComponent(youtubeUrl)}`,
-      `https://${rapidApiHost}/v2/video/details?videoId=${videoId}`,
-      `https://${rapidApiHost}/v2/video/download?url=${encodeURIComponent(youtubeUrl)}`,
-    ]
+    // Use the dedicated download endpoint
+    const resp = await fetch(`https://${rapidApiHost}/v2/video/download?url=${encodeURIComponent(youtubeUrl)}`, {
+      headers: {
+        'x-rapidapi-key': rapidApiKey,
+        'x-rapidapi-host': rapidApiHost,
+      },
+    })
 
+    if (!resp.ok) {
+      console.warn(`    RapidAPI download endpoint responded with status: ${resp.status}`)
+      return false
+    }
+
+    // Determine the actual download URL from the response
     let downloadUrl: string | null = null
-
-    for (const endpoint of endpoints) {
-      try {
-        const response = await fetch(endpoint, {
-          headers: {
-            'x-rapidapi-key': rapidApiKey,
-            'x-rapidapi-host': rapidApiHost,
-          },
-        })
-
-        if (!response.ok) continue
-        const data = (await response.json()) as any
-
-        // Check common RapidAPI format schemas
-        if (Array.isArray(data.videos?.items) && data.videos.items.length > 0) {
-          const direct =
-            data.videos.items.find(
-              (v: any) =>
-                v.url &&
-                (v.quality === '1080p' || v.quality === '720p' || v.hasAudio !== false),
-            ) || data.videos.items[0]
-          if (direct?.url) {
-            downloadUrl = direct.url
-            break
-          }
-        }
-        if (data.downloadUrl && typeof data.downloadUrl === 'string') {
-          downloadUrl = data.downloadUrl
-          break
-        }
-        if (Array.isArray(data.formats) && data.formats.length > 0) {
-          const mp4 =
-            data.formats.find(
-              (f: any) => f.url && f.mimeType?.includes('mp4') && f.hasAudio !== false,
-            ) || data.formats[0]
-          if (mp4?.url) {
-            downloadUrl = mp4.url
-            break
-          }
-        }
-        if (data.link && typeof data.link === 'string') {
-          downloadUrl = data.link
-          break
-        }
-        if (data.url && typeof data.url === 'string') {
-          downloadUrl = data.url
-          break
-        }
-      } catch {
-        // try next endpoint
+    const contentType = resp.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await resp.json()
+      if (data.downloadUrl && typeof data.downloadUrl === 'string') {
+        downloadUrl = data.downloadUrl
+      } else if (data.link && typeof data.link === 'string') {
+        downloadUrl = data.link
+      } else if (data.url && typeof data.url === 'string') {
+        downloadUrl = data.url
       }
+    } else {
+      // If the response is not JSON, assume the final URL (after redirects) is the media file
+      downloadUrl = resp.url
     }
 
     if (!downloadUrl) {
-      console.warn('  RapidAPI response did not contain a direct media URL. Falling back to yt-dlp...')
+      console.warn('    RapidAPI did not provide a download URL.')
       return false
     }
 
     console.log(`  Downloading direct media stream from RapidAPI...`)
-    const mediaRes = await fetch(downloadUrl)
-    if (!mediaRes.ok) throw new Error(`RapidAPI media fetch failed with status: ${mediaRes.status}`)
-    const arrayBuffer = await mediaRes.arrayBuffer()
+    const mediaResp = await fetch(downloadUrl)
+    if (!mediaResp.ok) throw new Error(`RapidAPI media fetch failed with status: ${mediaResp.status}`)
+    const arrayBuffer = await mediaResp.arrayBuffer()
     writeFileSync(outPath, Buffer.from(arrayBuffer))
     console.log(`  RapidAPI download succeeded (${Math.round(arrayBuffer.byteLength / 1024 / 1024)} MB).`)
     return true
   } catch (err: any) {
-    console.warn(`  RapidAPI download failed: ${err.message}. Falling back to yt-dlp...`)
+    console.warn(`  RapidAPI download failed: ${err.message}`)
     return false
   }
 }
