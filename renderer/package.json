@@ -8,6 +8,7 @@
     "worker": "tsx sourceRepair.ts",
     "worker:raw": "tsx worker.ts",
     "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline.ts",
+    "pipeline:worker": "tsx --import ./rapidApiFetchFallback.ts worker.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
