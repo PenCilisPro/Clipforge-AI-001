@@ -7,7 +7,7 @@
     "studio": "remotion studio src/index.ts",
     "worker": "tsx ffmpegWorker.ts",
     "worker:raw": "tsx ffmpegWorker.ts",
-    "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline.ts",
+    "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline-launcher.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
