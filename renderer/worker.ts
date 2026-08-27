@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js'
 import { bundle } from '@remotion/bundler'
 import { renderMedia, renderStill, selectComposition } from '@remotion/renderer'
 import type { EditPlan, BrollItem } from './src/types'
+import { queueReadyProjects } from './autoQueueProjects'
 
 function required(name: string) {
   const value = process.env[name]?.trim()
@@ -30,45 +31,20 @@ async function updateJob(id: string, fields: Record<string, unknown>) {
 async function syncProjectProgress(projectId: string) {
   const { data: clips, error: clipError } = await supabase.from('clips').select('id').eq('project_id', projectId)
   if (clipError || !clips?.length) return
-
-  const { data: jobs, error } = await supabase
-    .from('render_jobs')
-    .select('status,progress,error_message')
-    .in('clip_id', clips.map((c) => c.id))
-
+  const { data: jobs, error } = await supabase.from('render_jobs').select('status,progress').in('clip_id', clips.map((c) => c.id))
   if (error || !jobs?.length) return
-
   const total = jobs.length
   const completed = jobs.filter((j) => j.status === 'COMPLETED').length
   const failed = jobs.filter((j) => j.status === 'FAILED').length
-  const avg = jobs.reduce((sum, j) => sum + Number(j.progress || 0), 0) / total
+  const average = jobs.reduce((sum, j) => sum + Number(j.progress || 0), 0) / total
 
   if (failed > 0) {
-    await supabase.from('projects').update({
-      status: 'FAILED',
-      progress: Math.round(avg),
-      error_message: `${failed} clip render job(s) failed.`,
-      updated_at: new Date().toISOString(),
-    }).eq('id', projectId)
-    return
+    await supabase.from('projects').update({ status: 'FAILED', progress: Math.round(average), error_message: `${failed} clip render job(s) failed.`, updated_at: new Date().toISOString() }).eq('id', projectId)
+  } else if (completed === total) {
+    await supabase.from('projects').update({ status: 'COMPLETED', progress: 100, error_message: null, updated_at: new Date().toISOString() }).eq('id', projectId)
+  } else {
+    await supabase.from('projects').update({ status: 'RENDERING', progress: Math.max(90, Math.min(99, Math.round(average))), error_message: null, updated_at: new Date().toISOString() }).eq('id', projectId)
   }
-
-  if (completed === total) {
-    await supabase.from('projects').update({
-      status: 'COMPLETED',
-      progress: 100,
-      error_message: null,
-      updated_at: new Date().toISOString(),
-    }).eq('id', projectId)
-    return
-  }
-
-  await supabase.from('projects').update({
-    status: 'RENDERING',
-    progress: Math.max(90, Math.min(99, Math.round(avg))),
-    error_message: null,
-    updated_at: new Date().toISOString(),
-  }).eq('id', projectId)
 }
 
 async function download(url: string, destination: string) {
@@ -109,6 +85,7 @@ async function prepareBroll(items: BrollItem[], workDir: string, clipOffset: num
       const info = await stat(localFile)
       if (info.size < 1024) throw new Error('asset is empty or too small')
       prepared.push({ ...item, startAt: Math.max(0, item.startAt - clipOffset), localUrl: pathToFileURL(localFile).href })
+      console.log(`[Remotion] B-roll ${i + 1} ready`)
     } catch (error) {
       console.warn(`[Remotion] B-roll ${i + 1} skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -133,11 +110,10 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
   const workDir = path.join(os.tmpdir(), `clipforge-remotion-${job.id}`)
   await rm(workDir, { recursive: true, force: true })
   await mkdir(workDir, { recursive: true })
-
   let projectId: string | null = null
+
   try {
     await updateJob(job.id, { status: 'PREPARING', stage: 'LOADING_PLAN', progress: 1, started_at: new Date().toISOString(), error_message: null })
-
     const { data: version, error: versionError } = await supabase.from('clip_versions').select('id,clip_id,version_number,configuration_json').eq('id', job.clip_version_id).single()
     if (versionError || !version) throw new Error(versionError?.message || 'Clip version not found')
     const { data: clip, error: clipError } = await supabase.from('clips').select('id,project_id').eq('id', job.clip_id).single()
@@ -195,7 +171,6 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
     if (outputInfo.size < 1024) throw new Error('Remotion output is empty or too small')
 
     await updateJob(job.id, { status: 'UPLOADING', stage: 'UPLOADING_MP4', progress: 95 })
-    if (projectId) await syncProjectProgress(projectId)
     const renderKey = `projects/${projectId}/renders/${clip.id}-v${version.version_number}.mp4`
     const { error: uploadError } = await supabase.storage.from('renders').upload(renderKey, await readFile(outputPath), { contentType: 'video/mp4', upsert: true })
     if (uploadError) throw new Error(`Render upload failed: ${uploadError.message}`)
@@ -233,21 +208,22 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
 
 async function main() {
   console.log('========================================')
-  console.log('ClipForge Remotion worker active.')
-  console.log('Render jobs are created automatically after project processing.')
-  console.log('Waiting for QUEUED render jobs...')
+  console.log('ClipForge Remotion project worker active.')
+  console.log('Projects automatically enter the render queue after clip generation.')
+  console.log('Waiting for projects and queued render jobs...')
   console.log('========================================')
 
   while (true) {
+    await queueReadyProjects().catch((error) => console.error(`[Remotion] automatic project queue error: ${error instanceof Error ? error.message : String(error)}`))
     const { data: jobs, error } = await supabase.from('render_jobs').select('id,clip_id,clip_version_id').eq('status', 'QUEUED').order('created_at', { ascending: true }).limit(1)
     if (error) {
-      console.error(`[Remotion] queue error: ${error.message}`)
+      console.error(`[Remotion] render queue error: ${error.message}`)
       await sleep(3000)
       continue
     }
     const job = jobs?.[0] as { id: string; clip_id: string; clip_version_id: string } | undefined
     if (!job) {
-      await sleep(2500)
+      await sleep(2000)
       continue
     }
     const { data: claimed, error: claimError } = await supabase.from('render_jobs').update({ status: 'PREPARING', stage: 'CLAIMED', progress: 0 }).eq('id', job.id).eq('status', 'QUEUED').select('id').maybeSingle()
