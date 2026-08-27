@@ -7,8 +7,9 @@
     "studio": "remotion studio src/index.ts",
     "worker": "tsx ffmpegWorker.ts",
     "worker:raw": "tsx ffmpegWorker.ts",
-    "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline-launcher.ts",
-    "typecheck": "tsc --noEmit"
+    "pipeline": "tsx pipeline-launcher.ts",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/install-yt-dlp.mjs"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.505",

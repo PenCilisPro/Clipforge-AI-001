@@ -21,6 +21,7 @@
 
 import { execFile } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -30,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -66,13 +68,27 @@ const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
 // Claude is called through OpenRouter rather than api.anthropic.com
 // directly, using an OpenRouter key.
 const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
-const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
+// YouTube downloading uses yt-dlp as the primary method (free, no
+// subscription). RapidAPI is optional and only used as a fallback if
+// yt-dlp fails and a key happens to be configured.
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || null;
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
 const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
 
 const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
+
+// Path to the yt-dlp binary. Defaults to the one downloaded into
+// renderer/bin/ by scripts/install-yt-dlp.mjs during `npm install`; can be
+// overridden (e.g. to a system-wide install) with YTDLP_PATH.
+const YTDLP_PATH =
+  process.env.YTDLP_PATH ||
+  path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "bin",
+    "yt-dlp",
+  );
 
 // OpenRouter model slug for moment detection. Override with the
 // ANTHROPIC_MODEL env var if this default ever falls out of date.
@@ -95,7 +111,7 @@ const openRouterHeaders: Record<string, string> = {
 };
 
 const rapidApiHeaders: Record<string, string> = {
-  "x-rapidapi-key": RAPIDAPI_KEY,
+  "x-rapidapi-key": RAPIDAPI_KEY || "",
   "x-rapidapi-host": RAPIDAPI_HOST,
 };
 
@@ -445,10 +461,81 @@ async function syncProjectRenderProgress(
 // YOUTUBE DOWNLOAD
 // ============================================================================
 
+// Primary downloader — free, no subscription/quota. Uses the yt-dlp binary
+// installed at build time by scripts/install-yt-dlp.mjs (see YTDLP_PATH).
+async function downloadViaYtDlp(
+  youtubeUrl: string,
+  outPath: string,
+): Promise<boolean> {
+  if (!existsSync(YTDLP_PATH)) {
+    console.warn(
+      `yt-dlp binary not found at ${YTDLP_PATH} — skipping yt-dlp download.`,
+    );
+
+    return false;
+  }
+
+  console.log(
+    `Attempting YouTube download via yt-dlp (${YTDLP_PATH})...`,
+  );
+
+  try {
+    await execFileAsync(
+      YTDLP_PATH,
+      [
+        "--no-playlist",
+        "--no-part",
+        "--no-mtime",
+        "--merge-output-format",
+        "mp4",
+        "-f",
+        "bv*+ba/b",
+        "-o",
+        outPath,
+        youtubeUrl,
+      ],
+      { maxBuffer: 20 * 1024 * 1024 },
+    );
+
+    if (!existsSync(outPath)) {
+      console.warn("yt-dlp finished but produced no output file.");
+      return false;
+    }
+
+    const stats = statSync(outPath);
+
+    if (stats.size <= 0) {
+      console.warn("yt-dlp produced an empty file.");
+      return false;
+    }
+
+    console.log(
+      `Downloaded ${Math.round(stats.size / 1024 / 1024)} MB via yt-dlp.`,
+    );
+
+    return true;
+  } catch (error) {
+    console.warn(
+      "yt-dlp download failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+
+    return false;
+  }
+}
+
 async function downloadViaRapidApi(
   youtubeUrl: string,
   outPath: string,
 ): Promise<boolean> {
+  if (!RAPIDAPI_KEY) {
+    console.warn(
+      "RAPIDAPI_KEY not configured — skipping RapidAPI fallback.",
+    );
+
+    return false;
+  }
+
   console.log(
     `Attempting YouTube download via RapidAPI (${RAPIDAPI_HOST})...`,
   );
@@ -639,15 +726,25 @@ async function downloadSource(
       `YouTube video ID: ${videoId}`,
     );
 
-    const success =
-      await downloadViaRapidApi(
+    // yt-dlp first (free, no subscription). RapidAPI is only used as a
+    // fallback, and only if RAPIDAPI_KEY happens to be configured.
+    let success =
+      await downloadViaYtDlp(
         project.source_url,
         outPath,
       );
 
     if (!success) {
+      success =
+        await downloadViaRapidApi(
+          project.source_url,
+          outPath,
+        );
+    }
+
+    if (!success) {
       throw new Error(
-        "RapidAPI YouTube download failed.",
+        "YouTube download failed via both yt-dlp and RapidAPI.",
       );
     }
 
@@ -1118,9 +1215,11 @@ async function findMomentsWithClaude(
     fullText: string;
   } | null,
 ): Promise<Candidate[]> {
+  // Matches the frontend's "Number of Clips" input range (1-30) — this
+  // used to silently cap at 8 regardless of what was selected.
   const targetCount = Math.min(
     Math.max(project.max_clips || 6, 1),
-    8,
+    30,
   );
 
   const durationTarget =
@@ -1241,7 +1340,9 @@ Important:
         headers: openRouterHeaders,
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
-          max_tokens: 4000,
+          // Sized for up to 30 candidates (matches the max clip count the
+          // frontend allows) plus reasoning text per candidate.
+          max_tokens: 8000,
           messages: [
             {
               role: "user",
