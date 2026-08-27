@@ -32,39 +32,26 @@ export async function saveConfigurationAsVersion(
   return data as ClipVersion
 }
 
+/**
+ * Rendering is automatic after project creation. Cloud Export must never be
+ * the mechanism that starts a render. This function only returns an already
+ * queued/active render job so legacy callers cannot create duplicate jobs.
+ */
 export async function createRenderJob(clip: Clip, version: ClipVersion): Promise<RenderJob> {
-  const { data: existing } = await supabase
+  const { data: existing, error } = await supabase
     .from('render_jobs')
     .select('*')
     .eq('clip_id', clip.id)
     .eq('clip_version_id', version.id)
-    .in('status', ACTIVE_RENDER_STATUSES)
+    .in('status', [...ACTIVE_RENDER_STATUSES, 'COMPLETED'])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
 
+  if (error) throw new Error(error.message)
   if (existing) return existing as RenderJob
 
-  const { data, error } = await supabase
-    .from('render_jobs')
-    .insert({
-      clip_id: clip.id,
-      clip_version_id: version.id,
-      status: 'QUEUED',
-      progress: 0,
-      stage: 'QUEUED',
-    })
-    .select()
-    .single()
-
-  if (error) throw new Error(error.message)
-
-  await supabase
-    .from('clips')
-    .update({ status: 'RENDERING' })
-    .eq('id', clip.id)
-
-  return data as RenderJob
+  throw new Error('Rendering is automatic. This project has not been queued by the background worker yet.')
 }
 
 export async function restoreVersion(clip: Clip, version: ClipVersion): Promise<void> {
