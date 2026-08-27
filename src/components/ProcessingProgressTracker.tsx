@@ -65,20 +65,20 @@ const PIPELINE_STEPS: ProgressStep[] = [
 ]
 
 const STATUS_DETAILS: Partial<Record<ProcessingStatus, string>> = {
-  QUEUED: 'Initializing pipeline queue and validating video stream...',
-  DOWNLOADING: 'Connecting to YouTube downloader and streaming video frames...',
+  QUEUED: 'Queued. No video processing has started yet — 0%.',
+  DOWNLOADING: 'Downloading the source video in the background...',
   EXTRACTING_AUDIO: 'Extracting clean audio channel for high-accuracy speech detection...',
   TRANSCRIBING: 'OpenAI Whisper is transcribing spoken words and time intervals...',
   ANALYZING: 'AI is scanning transcript for high-impact viral moments and hooks...',
   MATCHING_PATTERNS: 'Matching content against viral patterns (The Secret, The Warning, The How-To)...',
   FINDING_CLIPS: 'Scoring viral probability, emotional hooks, and shareability...',
-  GENERATING_CONFIG: 'Assembling 9:16 vertical viewport framing and kinetic captions...',
-  RENDERING: 'Remotion video engine is rendering motion graphics and subtitles...',
-  ADDING_CAPTIONS: 'Styling animated karaoke captions and keyword highlights...',
-  FINDING_BROLL: 'Finding synchronized overlay B-roll footage...',
-  ADDING_MUSIC: 'Matching background audio track with auto-ducking...',
-  UPLOADING_RENDER: 'Saving generated clips to your Supabase cloud storage...',
-  COMPLETED: 'All viral clips successfully generated and ready to review!',
+  GENERATING_CONFIG: 'Preparing the clip configuration...',
+  RENDERING: 'Remotion is actively rendering the video...',
+  ADDING_CAPTIONS: 'Applying animated captions...',
+  FINDING_BROLL: 'Preparing synchronized overlay B-roll footage...',
+  ADDING_MUSIC: 'Preparing background audio...',
+  UPLOADING_RENDER: 'Uploading the finished MP4 to cloud storage...',
+  COMPLETED: 'The finished video has been rendered and uploaded successfully.',
 }
 
 export function ProcessingProgressTracker({
@@ -95,9 +95,8 @@ export function ProcessingProgressTracker({
   errorMessage?: string | null
 }) {
   const isFailed = status === 'FAILED'
-  const isComplete = status === 'COMPLETED'
+  const isComplete = status === 'COMPLETED' && progress >= 100
 
-  // Determine current active step index
   let activeStepIndex = 0
   if (isComplete) {
     activeStepIndex = PIPELINE_STEPS.length
@@ -110,14 +109,15 @@ export function ProcessingProgressTracker({
     }
   }
 
-  // Calculate dynamic display progress
+  // Never invent progress. A queued/not-started project is exactly 0%.
+  // Progress only comes from the backend `progress` value; completion requires
+  // both COMPLETED status and 100% progress.
   const displayProgress = isComplete
     ? 100
-    : progress
+    : Math.min(100, Math.max(0, Number.isFinite(progress) ? progress : 0))
 
   return (
     <div className="card mb-8 overflow-hidden border border-surface-700 bg-surface-900/90 shadow-xl backdrop-blur-sm">
-      {/* Top Header with Live Status & Percentage */}
       <div className="border-b border-surface-800 p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -143,7 +143,9 @@ export function ProcessingProgressTracker({
                     ? 'Processing Complete'
                     : isFailed
                       ? 'Processing Interrupted'
-                      : 'Processing Video & Generating AI Clips'}
+                      : status === 'QUEUED'
+                        ? 'Waiting in Queue'
+                        : 'Processing Video & Generating AI Clips'}
                 </h3>
                 <span className="rounded-md bg-surface-800 px-2 py-0.5 text-xs font-semibold tabular-nums text-brand-400">
                   {Math.round(displayProgress)}%
@@ -155,7 +157,6 @@ export function ProcessingProgressTracker({
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="flex items-center gap-2">
             {onRunAiNow && !isComplete && (
               <button
@@ -175,7 +176,6 @@ export function ProcessingProgressTracker({
           </div>
         </div>
 
-        {/* Big Animated Progress Bar */}
         <div className="mt-4">
           <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-surface-800">
             <div
@@ -187,13 +187,12 @@ export function ProcessingProgressTracker({
                     ? 'bg-emerald-500'
                     : 'bg-gradient-to-r from-brand-600 via-brand-500 to-indigo-400',
               )}
-              style={{ width: `${Math.min(100, Math.max(5, displayProgress))}%` }}
+              style={{ width: `${displayProgress}%` }}
             />
           </div>
         </div>
       </div>
 
-      {/* 5-Step Pipeline Visual Grid */}
       <div className="grid grid-cols-1 divide-y divide-surface-800 bg-surface-950/40 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
         {PIPELINE_STEPS.map((step, idx) => {
           const Icon = step.icon
@@ -208,7 +207,6 @@ export function ProcessingProgressTracker({
                 isCurrent ? 'bg-brand-500/5' : '',
               )}
             >
-              {/* Top step index & status indicator */}
               <div className="flex items-center justify-between">
                 <div
                   className={classNames(
@@ -235,7 +233,6 @@ export function ProcessingProgressTracker({
                 />
               </div>
 
-              {/* Step info */}
               <div className="mt-3">
                 <div className="flex items-center gap-1.5">
                   <span
@@ -259,7 +256,6 @@ export function ProcessingProgressTracker({
                 </p>
               </div>
 
-              {/* Bottom active pill if current */}
               {isCurrent && (
                 <div className="mt-2 flex items-center gap-1 text-[10px] font-medium text-brand-400">
                   <Loader2 className="h-3 w-3 animate-spin" />
@@ -276,7 +272,6 @@ export function ProcessingProgressTracker({
         })}
       </div>
 
-      {/* Error message if failed */}
       {isFailed && (
         <div className="border-t border-rose-500/20 bg-rose-500/10 p-4">
           <div className="flex items-start gap-3">
