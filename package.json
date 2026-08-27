@@ -11,9 +11,6 @@
     "setup:dev-env": "node scripts/setup-dev-env.js"
   },
   "dependencies": {
-    "@remotion/bundler": "^4.0.518",
-    "@remotion/player": "^4.0.513",
-    "@remotion/renderer": "^4.0.518",
     "@supabase/supabase-js": "^2.109.0",
     "date-fns": "^4.4.0",
     "lucide-react": "^1.32.0",
@@ -21,8 +18,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",
-    "recharts": "^3.10.1",
-    "remotion": "^4.0.518"
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
