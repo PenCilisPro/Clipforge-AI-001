@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFile, unlink } from "node:fs/promises";
 import { createClient } from "@supabase/supabase-js";
 
 function requireEnv(name: string): string {
@@ -16,20 +17,83 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-function extractYoutubeId(url?: string | null): string | null {
-  if (!url) return null;
-  const match = url.trim().match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/);
-  return match?.[1] || null;
-}
-
 function isStoragePath(value?: string | null): boolean {
   return !!value && !/^https?:\/\//i.test(value) && value.startsWith("projects/");
 }
 
-async function downloadYoutubeToStorage(projectId: string, youtubeUrl: string): Promise<string> {
-  if (!RAPIDAPI_KEY) {
-    throw new Error("RAPIDAPI_KEY (or VITE_RAPIDAPI_KEY) is required to repair a YouTube source.");
+async function uploadSource(projectId: string, bytes: Buffer): Promise<string> {
+  if (bytes.length === 0) throw new Error("Downloaded YouTube file was empty.");
+
+  const storagePath = `projects/${projectId}/source/source.mp4`;
+  const { error } = await supabase.storage.from("sources").upload(storagePath, bytes, {
+    contentType: "video/mp4",
+    upsert: true,
+  });
+  if (error) throw new Error(`Source upload failed: ${error.message}`);
+
+  await supabase
+    .from("videos")
+    .update({ storage_path: storagePath, file_size: bytes.length })
+    .eq("project_id", projectId);
+
+  return storagePath;
+}
+
+function runYtDlp(youtubeUrl: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "--no-playlist",
+      "--no-warnings",
+      "--format",
+      "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+      "--merge-output-format",
+      "mp4",
+      "--output",
+      outputPath,
+      youtubeUrl,
+    ];
+
+    console.log(`[source-repair] Running yt-dlp fallback for ${youtubeUrl}`);
+    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"], shell: false });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.stdout.on("data", (chunk) => {
+      const line = chunk.toString().trim();
+      if (line) console.log(`[source-repair] yt-dlp: ${line}`);
+    });
+
+    child.on("error", (error) => reject(new Error(`Could not start yt-dlp: ${error.message}`)));
+    child.on("exit", (code, signal) => {
+      if (code === 0) return resolve();
+      const detail = stderr.trim().split("\n").slice(-8).join("\n");
+      reject(new Error(`yt-dlp exited with code ${code ?? "null"}${signal ? ` (${signal})` : ""}${detail ? `: ${detail}` : "`"}`));
+    });
+  });
+}
+
+async function downloadWithYtDlpToStorage(projectId: string, youtubeUrl: string): Promise<string> {
+  const outputPath = `/tmp/clipforge-${projectId}.%(ext)s`;
+  const finalPath = `/tmp/clipforge-${projectId}.mp4`;
+
+  try {
+    await runYtDlp(youtubeUrl, outputPath);
+    const bytes = await readFile(finalPath);
+    const storagePath = await uploadSource(projectId, bytes);
+    console.log(`[source-repair] yt-dlp fallback succeeded (${bytes.length} bytes) -> ${storagePath}`);
+    return storagePath;
+  } finally {
+    await unlink(finalPath).catch(() => undefined);
+    await unlink(`/tmp/clipforge-${projectId}.webm`).catch(() => undefined);
+    await unlink(`/tmp/clipforge-${projectId}.mkv`).catch(() => undefined);
+    await unlink(`/tmp/clipforge-${projectId}.mp4.part`).catch(() => undefined);
   }
+}
+
+async function downloadWithRapidApiToStorage(projectId: string, youtubeUrl: string): Promise<string> {
+  if (!RAPIDAPI_KEY) throw new Error("RAPIDAPI_KEY is not configured.");
 
   const response = await fetch(
     `https://${RAPIDAPI_HOST}/v2/video/download?url=${encodeURIComponent(youtubeUrl)}`,
@@ -63,14 +127,7 @@ async function downloadYoutubeToStorage(projectId: string, youtubeUrl: string): 
     ];
     downloadUrl = candidates.find((x) => typeof x === "string" && x.length > 0) || null;
   } else {
-    const bytes = Buffer.from(await response.arrayBuffer());
-    const storagePath = `projects/${projectId}/source/source.mp4`;
-    const { error } = await supabase.storage.from("sources").upload(storagePath, bytes, {
-      contentType: "video/mp4",
-      upsert: true,
-    });
-    if (error) throw new Error(`Source upload failed: ${error.message}`);
-    return storagePath;
+    return uploadSource(projectId, Buffer.from(await response.arrayBuffer()));
   }
 
   if (!downloadUrl) throw new Error("RapidAPI did not return a usable download URL.");
@@ -78,22 +135,18 @@ async function downloadYoutubeToStorage(projectId: string, youtubeUrl: string): 
   const media = await fetch(downloadUrl);
   if (!media.ok) throw new Error(`RapidAPI media URL returned ${media.status}.`);
 
-  const bytes = Buffer.from(await media.arrayBuffer());
-  if (bytes.length === 0) throw new Error("Downloaded YouTube file was empty.");
+  return uploadSource(projectId, Buffer.from(await media.arrayBuffer()));
+}
 
-  const storagePath = `projects/${projectId}/source/source.mp4`;
-  const { error } = await supabase.storage.from("sources").upload(storagePath, bytes, {
-    contentType: "video/mp4",
-    upsert: true,
-  });
-  if (error) throw new Error(`Source upload failed: ${error.message}`);
-
-  await supabase
-    .from("videos")
-    .update({ storage_path: storagePath, file_size: bytes.length })
-    .eq("project_id", projectId);
-
-  return storagePath;
+async function downloadYoutubeToStorage(projectId: string, youtubeUrl: string): Promise<string> {
+  try {
+    console.log(`[source-repair] Attempting RapidAPI download...`);
+    return await downloadWithRapidApiToStorage(projectId, youtubeUrl);
+  } catch (rapidError) {
+    const message = rapidError instanceof Error ? rapidError.message : String(rapidError);
+    console.warn(`[source-repair] RapidAPI unavailable (${message}); falling back to yt-dlp.`);
+    return await downloadWithYtDlpToStorage(projectId, youtubeUrl);
+  }
 }
 
 async function repairQueuedSources(): Promise<void> {
