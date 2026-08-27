@@ -1,25 +1,13 @@
 import 'dotenv/config'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { promisify } from 'node:util'
-import { execFile } from 'node:child_process'
 import { createClient } from '@supabase/supabase-js'
 import { bundle } from '@remotion/bundler'
 import { renderMedia, renderStill, selectComposition } from '@remotion/renderer'
 import type { EditPlan, BrollItem } from './src/types'
-
-const require = createRequire(import.meta.url)
-const ffmpegStatic = (() => {
-  try { return require('ffmpeg-static') as string | null } catch { return null }
-})()
-const ffprobeStatic = (() => {
-  try { return (require('ffprobe-static') as { path?: string })?.path ?? null } catch { return null }
-})()
-const exec = promisify(execFile)
 
 function required(name: string) {
   const value = process.env[name]?.trim()
@@ -29,10 +17,7 @@ function required(name: string) {
 
 const SUPABASE_URL = required('SUPABASE_URL')
 const SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY')
-const FFPROBE = process.env.FFPROBE_PATH?.trim() || ffprobeStatic || 'ffprobe'
-const FFMPEG = process.env.FFMPEG_PATH?.trim() || ffmpegStatic || 'ffmpeg'
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-
 let serveUrl: string | null = null
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)) }
@@ -80,9 +65,10 @@ async function prepareBroll(items: BrollItem[], workDir: string, clipOffset: num
     try {
       const localFile = path.join(workDir, `broll-${i}.mp4`)
       await download(url, localFile)
-      const { stdout } = await exec(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', localFile])
-      if (stdout.trim() !== 'video') throw new Error('asset has no video stream')
+      const info = await stat(localFile)
+      if (info.size < 1024) throw new Error('asset is empty or too small')
       prepared.push({ ...item, startAt: Math.max(0, item.startAt - clipOffset), localUrl: pathToFileURL(localFile).href })
+      console.log(`[Remotion] B-roll ${i + 1} ready (${Math.round(info.size / 1024)} KB)`)
     } catch (error) {
       console.warn(`[Remotion] B-roll ${i + 1}: skipped (${error instanceof Error ? error.message : String(error)})`)
     }
@@ -117,25 +103,24 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
     if (clipError || !clip) throw new Error(clipError?.message || 'Clip not found')
 
     const rawPlan = version.configuration_json as unknown as EditPlan
-    const sourceFile = await resolveSource(rawPlan.sourceVideo, workDir)
     const clipStart = Number(rawPlan.startTime ?? 0)
     const clipEnd = Number(rawPlan.endTime ?? clipStart + 30)
+    const sourceFile = await resolveSource(rawPlan.sourceVideo, workDir)
+    const broll = await prepareBroll(rawPlan.broll ?? [], workDir, clipStart)
+    const music = await prepareMusic(rawPlan, workDir)
+
     const normalizedPlan: EditPlan = {
       ...rawPlan,
       sourceVideo: pathToFileURL(sourceFile).href,
       startTime: 0,
       endTime: Math.max(1, clipEnd - clipStart),
       resolution: rawPlan.resolution ?? { width: 1080, height: 1920 },
+      broll: broll.map(({ localUrl, ...item }) => ({ ...item, videoUrl: localUrl })),
+      music: music && rawPlan.music ? { ...rawPlan.music, audioUrl: music } : rawPlan.music ?? null,
     }
 
-    await updateJob(job.id, { status: 'RENDERING', stage: 'DOWNLOADING_BROLL', progress: 5 })
-    const broll = await prepareBroll(rawPlan.broll ?? [], workDir, clipStart)
-    const music = await prepareMusic(rawPlan, workDir)
-    normalizedPlan.broll = broll.map(({ localUrl, ...item }) => ({ ...item, videoUrl: localUrl }))
-    if (music) normalizedPlan.music = { ...rawPlan.music!, audioUrl: music }
-
     if (!serveUrl) {
-      await updateJob(job.id, { status: 'RENDERING', stage: 'BUNDLING_REMOTION', progress: 8 })
+      await updateJob(job.id, { status: 'RENDERING', stage: 'BUNDLING_REMOTION', progress: 6 })
       serveUrl = await bundle({ entryPoint: path.resolve('src/index.ts') })
     }
 
@@ -147,8 +132,8 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
 
     const outputPath = path.join(workDir, 'finished.mp4')
     await updateJob(job.id, { status: 'RENDERING', stage: 'REMOTION_RENDERING', progress: 10 })
-
     let lastReported = 10
+
     await renderMedia({
       composition,
       serveUrl,
@@ -165,12 +150,10 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
       },
     })
 
-    await updateJob(job.id, { status: 'UPLOADING', stage: 'VALIDATING_OUTPUT', progress: 92 })
-    const { stdout } = await exec(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-show_entries', 'stream=codec_type', '-of', 'json', outputPath])
-    const probe = JSON.parse(stdout) as { streams?: Array<{ codec_type?: string }>; format?: { duration?: string } }
-    if (!probe.streams?.some((stream) => stream.codec_type === 'video')) throw new Error('Remotion produced no video stream')
+    const outputInfo = await stat(outputPath)
+    if (outputInfo.size < 1024) throw new Error('Remotion output is empty or too small')
 
-    await updateJob(job.id, { status: 'UPLOADING', stage: 'UPLOADING_MP4', progress: 96 })
+    await updateJob(job.id, { status: 'UPLOADING', stage: 'UPLOADING_MP4', progress: 95 })
     const renderKey = `projects/${clip.project_id}/renders/${clip.id}-v${version.version_number}.mp4`
     const { error: uploadError } = await supabase.storage.from('renders').upload(renderKey, await readFile(outputPath), { contentType: 'video/mp4', upsert: true })
     if (uploadError) throw new Error(`Render upload failed: ${uploadError.message}`)
@@ -178,6 +161,7 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
 
     let thumbnailUrl: string | null = null
     try {
+      await updateJob(job.id, { status: 'UPLOADING', stage: 'GENERATING_THUMBNAIL', progress: 97 })
       const thumbnailPath = path.join(workDir, 'thumbnail.jpg')
       await renderStill({ composition, serveUrl, output: thumbnailPath, inputProps: { plan: normalizedPlan }, frame: 0, imageFormat: 'jpeg' })
       const key = `projects/${clip.project_id}/thumbnails/${clip.id}-v${version.version_number}.jpg`
@@ -187,7 +171,8 @@ async function renderJob(job: { id: string; clip_id: string; clip_version_id: st
       console.warn(`[Remotion] thumbnail skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    await supabase.from('clip_versions').update({ render_url: renderUrl, thumbnail_url: thumbnailUrl, status: 'COMPLETED' }).eq('id', version.id)
+    const { error: versionUpdateError } = await supabase.from('clip_versions').update({ render_url: renderUrl, thumbnail_url: thumbnailUrl, status: 'COMPLETED' }).eq('id', version.id)
+    if (versionUpdateError) throw new Error(`Version update failed: ${versionUpdateError.message}`)
     const { error: clipUpdateError } = await supabase.from('clips').update({ current_version_id: version.id, current_render_url: renderUrl, current_thumbnail_url: thumbnailUrl, status: 'RENDERED' }).eq('id', clip.id)
     if (clipUpdateError) throw new Error(`Clip update failed: ${clipUpdateError.message}`)
 
@@ -207,7 +192,6 @@ async function main() {
   console.log('ClipForge Remotion worker active.')
   console.log('Waiting for QUEUED render jobs...')
   console.log('========================================')
-  await exec(FFPROBE, ['-version'])
 
   while (true) {
     const { data: jobs, error } = await supabase.from('render_jobs').select('id,clip_id,clip_version_id').eq('status', 'QUEUED').order('created_at', { ascending: true }).limit(1)
