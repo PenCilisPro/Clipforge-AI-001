@@ -4,11 +4,11 @@
 // 1. Claim QUEUED project
 // 2. Download the full source video (YouTube or uploaded file)
 // 3. Probe source, extract full audio, transcribe the WHOLE video with
-//    Whisper, and save that transcript (used for the "View Transcript" UI)
-// 4. Send the transcript to Claude so it picks the best moments based on
-//    actual content, not just the title
+//    Gemini, and save that transcript (used for the "View Transcript" UI)
+// 4. Send the transcript to Claude (via OpenRouter) so it picks the best
+//    moments based on actual content, not just the title
 // 5. Create clip records for each candidate moment
-// 6. Slice each clip with ffmpeg, transcribe the clipped audio with Whisper
+// 6. Slice each clip with ffmpeg, transcribe the clipped audio with Gemini
 //    for burned-in captions, and find B-roll + music
 // 7. Create clip_versions as QUEUED
 // 8. Create render_jobs as QUEUED
@@ -60,8 +60,12 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
-const ANTHROPIC_API_KEY = requireEnv("ANTHROPIC_API_KEY");
+// Gemini handles transcription (full-video + per-clip captions) instead of
+// OpenAI Whisper — no OpenAI key required.
+const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
+// Claude is called through OpenRouter rather than api.anthropic.com
+// directly, using an OpenRouter key.
+const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
 const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
 const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
@@ -70,17 +74,24 @@ const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
 
+// OpenRouter model slug for moment detection. Override with the
+// ANTHROPIC_MODEL env var if this default ever falls out of date.
 const ANTHROPIC_MODEL =
-  process.env.ANTHROPIC_MODEL || "claude-opus-4-1";
+  process.env.ANTHROPIC_MODEL || "anthropic/claude-sonnet-5";
+
+// Gemini model used for audio transcription.
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
 // ============================================================================
 // API HEADERS
 // ============================================================================
 
-const anthropicHeaders: Record<string, string> = {
-  "x-api-key": ANTHROPIC_API_KEY,
-  "anthropic-version": "2023-06-01",
-  "content-type": "application/json",
+const openRouterHeaders: Record<string, string> = {
+  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+  "Content-Type": "application/json",
+  "HTTP-Referer": "https://clipforge.app",
+  "X-Title": "ClipForge AI",
 };
 
 const rapidApiHeaders: Record<string, string> = {
@@ -92,9 +103,7 @@ const pexelsHeaders: Record<string, string> = {
   Authorization: PEXELS_API_KEY,
 };
 
-const openAiHeaders: Record<string, string> = {
-  Authorization: `Bearer ${OPENAI_API_KEY}`,
-};
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // ============================================================================
 // SUPABASE
@@ -849,18 +858,19 @@ async function extractFullAudio(
 }
 
 // ============================================================================
-// FULL-VIDEO WHISPER TRANSCRIPT
+// GEMINI TRANSCRIPTION (replaces OpenAI Whisper)
 // ============================================================================
 //
-// This transcribes the ENTIRE source video (not an individual clip) so that
-// Claude can pick moments based on what is actually said, instead of only
-// the project title. It also gives us a real transcript to store for the
-// "View Transcript" UI.
+// Gemini takes audio directly as inline base64 data and is asked to return
+// a JSON transcript with segment-level timestamps. Unlike Whisper, Gemini
+// isn't a dedicated forced-aligner, so word-level timing (needed for
+// karaoke-style burned-in captions) is approximated by evenly distributing
+// each segment's words across that segment's [start, end] window,
+// proportional to word length. That's good enough for readable captions
+// but won't be frame-perfect the way Whisper's native word timestamps are.
 //
-// Note: the OpenAI transcription endpoint caps uploads at 25MB. At 64kbps
-// mono that's roughly ~50 minutes of audio. Very long source videos may
-// exceed that and fail gracefully (Claude then falls back to duration-based
-// candidates, same as before this change).
+// Gemini's inline data limit is ~20MB per request; base64 adds ~33%
+// overhead, so we cap raw audio uploads well under that.
 
 interface FullTranscriptSegment {
   start: number;
@@ -868,55 +878,75 @@ interface FullTranscriptSegment {
   text: string;
 }
 
-async function transcribeFullVideo(
-  fullAudioPath: string,
-): Promise<{
-  segments: FullTranscriptSegment[];
-  fullText: string;
-} | null> {
+const GEMINI_MAX_AUDIO_BYTES = 15 * 1024 * 1024;
+
+const TRANSCRIPTION_PROMPT = `Transcribe this audio completely and accurately.
+
+Return ONLY valid JSON in this exact shape, with no markdown fences and no
+commentary:
+
+{
+  "segments": [
+    { "start": 0.0, "end": 4.2, "text": "..." }
+  ]
+}
+
+Rules:
+- "start" and "end" are seconds from the beginning of the audio, as numbers.
+- Break the transcript into short segments (roughly one sentence or
+  natural phrase each), in chronological order, covering the entire audio.
+- Timestamps must be as accurate as you can make them.
+- Do not skip or summarize any spoken content.
+- If a stretch of audio has no speech, omit it rather than inventing text.`;
+
+async function callGeminiTranscription(
+  audioPath: string,
+): Promise<FullTranscriptSegment[] | null> {
   try {
-    const stats = statSync(fullAudioPath);
+    const stats = statSync(audioPath);
 
-    const MAX_UPLOAD_BYTES = 24 * 1024 * 1024;
-
-    if (stats.size > MAX_UPLOAD_BYTES) {
+    if (stats.size > GEMINI_MAX_AUDIO_BYTES) {
       console.warn(
-        `Full-video audio is ${Math.round(
+        `Audio is ${Math.round(
           stats.size / 1024 / 1024,
-        )}MB, over the Whisper upload limit — skipping full transcript.`,
+        )}MB, over the Gemini inline upload limit — skipping transcription.`,
       );
 
       return null;
     }
 
-    const form = new FormData();
-
-    const audioBuffer = readFileSync(fullAudioPath);
-
-    form.append(
-      "file",
-      new Blob([audioBuffer], { type: "audio/mpeg" }),
-      "source.mp3",
+    const base64Audio = readFileSync(audioPath).toString(
+      "base64",
     );
 
-    form.append("model", "whisper-1");
-    form.append("response_format", "verbose_json");
-    form.append("timestamp_granularities[]", "segment");
-
-    const response = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: openAiHeaders,
-        body: form,
-      },
-    );
+    const response = await fetch(GEMINI_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                inline_data: {
+                  mime_type: "audio/mp3",
+                  data: base64Audio,
+                },
+              },
+              { text: TRANSCRIPTION_PROMPT },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0,
+        },
+      }),
+    });
 
     if (!response.ok) {
       const errorText = await response.text();
 
       console.warn(
-        `Full-video Whisper transcription returned ${response.status}: ${errorText}`,
+        `Gemini transcription returned ${response.status}: ${errorText}`,
       );
 
       return null;
@@ -924,26 +954,123 @@ async function transcribeFullVideo(
 
     const data = (await response.json()) as any;
 
-    const segments: FullTranscriptSegment[] = (
-      data.segments ?? []
-    ).map((segment: any) => ({
-      start: Number(Number(segment.start).toFixed(2)),
-      end: Number(Number(segment.end).toFixed(2)),
-      text: String(segment.text || "").trim(),
-    }));
+    const rawText =
+      data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    return {
-      segments,
-      fullText: String(data.text || "").trim(),
-    };
+    if (!rawText) {
+      console.warn("Gemini returned empty transcription content.");
+      return null;
+    }
+
+    const cleanedText = rawText
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+
+    const parsed = JSON.parse(cleanedText);
+
+    if (!Array.isArray(parsed.segments)) {
+      console.warn("Gemini transcription JSON had no segments array.");
+      return null;
+    }
+
+    const segments: FullTranscriptSegment[] = parsed.segments
+      .filter(
+        (segment: any) =>
+          Number.isFinite(Number(segment.start)) &&
+          Number.isFinite(Number(segment.end)) &&
+          Number(segment.end) > Number(segment.start),
+      )
+      .map((segment: any) => ({
+        start: Number(Number(segment.start).toFixed(2)),
+        end: Number(Number(segment.end).toFixed(2)),
+        text: String(segment.text || "").trim(),
+      }));
+
+    return segments;
   } catch (error) {
     console.warn(
-      "Full-video Whisper transcription failed:",
+      "Gemini transcription failed:",
       error instanceof Error ? error.message : String(error),
     );
 
     return null;
   }
+}
+
+// Splits each segment's text into words and spreads them across the
+// segment's [start, end] window proportional to word length. This is an
+// approximation used only because Gemini doesn't give real word-level
+// timestamps the way Whisper does.
+function estimateWordTimestamps(
+  segments: FullTranscriptSegment[],
+): CaptionWordConfig[] {
+  const words: CaptionWordConfig[] = [];
+
+  for (const segment of segments) {
+    const segmentWords = segment.text
+      .split(/\s+/)
+      .filter((word) => word.length > 0);
+
+    if (segmentWords.length === 0) continue;
+
+    const totalChars = segmentWords.reduce(
+      (sum, word) => sum + word.length,
+      0,
+    );
+
+    const segmentDuration = Math.max(
+      0.01,
+      segment.end - segment.start,
+    );
+
+    let cursor = segment.start;
+
+    for (const word of segmentWords) {
+      const share =
+        totalChars > 0 ? word.length / totalChars : 1 / segmentWords.length;
+
+      const wordDuration = segmentDuration * share;
+
+      words.push({
+        text: word,
+        start: Number(cursor.toFixed(2)),
+        end: Number(
+          Math.min(segment.end, cursor + wordDuration).toFixed(2),
+        ),
+      });
+
+      cursor += wordDuration;
+    }
+  }
+
+  return words;
+}
+
+// ----------------------------------------------------------------------
+// Full-video transcript
+// ----------------------------------------------------------------------
+//
+// Transcribes the ENTIRE source video (not an individual clip) so that
+// Claude can pick moments based on what is actually said, instead of only
+// the project title. It also gives us a real transcript to store for the
+// "View Transcript" UI.
+
+async function transcribeFullVideo(
+  fullAudioPath: string,
+): Promise<{
+  segments: FullTranscriptSegment[];
+  fullText: string;
+} | null> {
+  const segments = await callGeminiTranscription(fullAudioPath);
+
+  if (!segments || segments.length === 0) return null;
+
+  return {
+    segments,
+    fullText: segments.map((segment) => segment.text).join(" "),
+  };
 }
 
 async function saveFullTranscript(
@@ -1104,11 +1231,14 @@ Important:
 `;
 
   try {
+    // Routed through OpenRouter (not api.anthropic.com directly), which
+    // normalizes every provider to the OpenAI-style chat completions
+    // response shape below.
     const response = await fetch(
-      "https://api.anthropic.com/v1/messages",
+      "https://openrouter.ai/api/v1/chat/completions",
       {
         method: "POST",
-        headers: anthropicHeaders,
+        headers: openRouterHeaders,
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
           max_tokens: 4000,
@@ -1127,7 +1257,7 @@ Important:
         await response.text();
 
       console.warn(
-        `Claude returned ${response.status}: ${errorText}`,
+        `Claude (via OpenRouter) returned ${response.status}: ${errorText}`,
       );
 
       return createFallbackCandidates(
@@ -1141,7 +1271,7 @@ Important:
       (await response.json()) as any;
 
     const text =
-      json.content?.[0]?.text || "";
+      json.choices?.[0]?.message?.content || "";
 
     if (!text) {
       console.warn(
@@ -1489,7 +1619,7 @@ async function extractClipAudio(
 }
 
 // ============================================================================
-// WHISPER
+// PER-CLIP CAPTIONS (Gemini)
 // ============================================================================
 
 async function transcribeClippedAudio(
@@ -1498,111 +1628,16 @@ async function transcribeClippedAudio(
   words: CaptionWordConfig[];
   text: string;
 }> {
-  try {
-    const form = new FormData();
+  const segments = await callGeminiTranscription(clipAudioPath);
 
-    const audioBuffer =
-      readFileSync(
-        clipAudioPath,
-      );
-
-    form.append(
-      "file",
-      new Blob(
-        [audioBuffer],
-        {
-          type: "audio/mpeg",
-        },
-      ),
-      "clip.mp3",
-    );
-
-    form.append(
-      "model",
-      "whisper-1",
-    );
-
-    form.append(
-      "response_format",
-      "verbose_json",
-    );
-
-    form.append(
-      "timestamp_granularities[]",
-      "word",
-    );
-
-    form.append(
-      "timestamp_granularities[]",
-      "segment",
-    );
-
-    const response =
-      await fetch(
-        "https://api.openai.com/v1/audio/transcriptions",
-        {
-          method: "POST",
-          headers: openAiHeaders,
-          body: form,
-        },
-      );
-
-    if (!response.ok) {
-      const errorText =
-        await response.text();
-
-      console.warn(
-        `Whisper returned ${response.status}: ${errorText}`,
-      );
-
-      return {
-        words: [],
-        text: "",
-      };
-    }
-
-    const data =
-      (await response.json()) as any;
-
-    const words:
-      CaptionWordConfig[] =
-      (data.words ?? []).map(
-        (word: any) => ({
-          text: String(
-            word.word || "",
-          ).trim(),
-
-          start: Number(
-            Number(
-              word.start,
-            ).toFixed(2),
-          ),
-
-          end: Number(
-            Number(
-              word.end,
-            ).toFixed(2),
-          ),
-        }),
-      );
-
-    return {
-      words,
-      text: data.text || "",
-    };
-  } catch (error) {
-    console.warn(
-      "Whisper failed:",
-      error instanceof Error
-        ? error.message
-        : String(error),
-    );
-
-    return {
-      words: [],
-      text: "",
-    };
+  if (!segments || segments.length === 0) {
+    return { words: [], text: "" };
   }
+
+  return {
+    words: estimateWordTimestamps(segments),
+    text: segments.map((segment) => segment.text).join(" "),
+  };
 }
 
 // ============================================================================
@@ -2046,7 +2081,7 @@ async function processProject(
     // ----------------------------------------------------------------------
 
     // "GENERATING_CONFIG" matches the frontend's "Clip Generation" step
-    // (ffmpeg slicing + per-clip Whisper captions + B-roll + music all
+    // (ffmpeg slicing + per-clip Gemini captions + B-roll + music all
     // happen inside this per-clip loop below).
     await setStatus(
       project.id,
@@ -2161,7 +2196,7 @@ async function processProject(
       );
 
       // --------------------------------------------------------------------
-      // C. WHISPER
+      // C. CAPTIONS (Gemini)
       // --------------------------------------------------------------------
 
       const clipAudioPath =
@@ -2176,7 +2211,7 @@ async function processProject(
       );
 
       const {
-        words: whisperWords,
+        words: captionWords,
       } =
         await transcribeClippedAudio(
           clipAudioPath,
@@ -2292,7 +2327,7 @@ async function processProject(
             lineSpacing: 1.2,
           },
 
-          words: whisperWords,
+          words: captionWords,
         },
 
         broll: broll
