@@ -1,60 +1,64 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl =
-  ((import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? '').trim()
+// The project URL is safe to expose in a browser bundle. Keeping this fallback
+// prevents a deployment from becoming unusable solely because Vercel omitted
+// the URL variable. The public key must still be configured in Vercel.
+const DEFAULT_SUPABASE_URL = 'https://uenjvbtwlawhpsybamnp.supabase.co'
 
-const supabaseAnonKey =
-  ((import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ?? '').trim()
+const supabaseUrl = (
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) ??
+  DEFAULT_SUPABASE_URL
+).trim()
 
-// Safe diagnostic logging — never log the actual API key.
-console.log('[Supabase] URL configured:', Boolean(supabaseUrl))
-console.log('[Supabase] Anon key configured:', Boolean(supabaseAnonKey))
+// Supabase supports both the legacy anon key and the newer publishable key.
+const supabaseAnonKey = (
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ??
+  (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ??
+  ''
+).trim()
 
-let isValidUrl = true
+const isValidUrl = /^https?:\/\//i.test(supabaseUrl)
+const isSupabaseConfigured = Boolean(isValidUrl && supabaseAnonKey)
 
-if (
-  supabaseUrl &&
-  !supabaseUrl.startsWith('http://') &&
-  !supabaseUrl.startsWith('https://')
-) {
-  console.error(
-    '[Supabase] Invalid URL. VITE_SUPABASE_URL must start with http:// or https://'
-  )
-  isValidUrl = false
+// Safe diagnostics: never print the actual key.
+console.log('[Supabase] URL configured:', Boolean(supabaseUrl), supabaseUrl)
+console.log('[Supabase] Public key configured:', Boolean(supabaseAnonKey))
+
+if (!isValidUrl) {
+  console.error('[Supabase] Invalid VITE_SUPABASE_URL.')
 }
 
-if (!supabaseUrl || !supabaseAnonKey) {
+if (!supabaseAnonKey) {
   console.error(
-    '[Supabase] Missing environment variables. Make sure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are configured in Vercel before building.'
+    '[Supabase] Missing VITE_SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_KEY). Add it to Vercel Environment Variables and redeploy.',
   )
 }
 
-export const isSupabaseConfigured = Boolean(
-  supabaseUrl &&
-  supabaseAnonKey &&
-  isValidUrl
-)
+// Keep the application renderable when configuration is incomplete. The real
+// key is still required before auth or Edge Functions can work.
+const clientKey = supabaseAnonKey || 'missing-public-key'
 
-// Create the Supabase client.
-export const supabase = createClient(
-  supabaseUrl,
-  supabaseAnonKey
-)
+export { isSupabaseConfigured }
 
-// Helper for calling Supabase Edge Functions.
+export const supabase = createClient(supabaseUrl, clientKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+})
+
 export async function invokeFunction<T>(
   name: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
 ): Promise<T> {
   if (!isSupabaseConfigured) {
     throw new Error(
-      'Supabase is not configured. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+      'Supabase is not configured. Set VITE_SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_KEY) in Vercel and redeploy.',
     )
   }
 
-  const { data, error } = await supabase.functions.invoke(name, {
-    body,
-  })
+  const { data, error } = await supabase.functions.invoke(name, { body })
 
   if (error) {
     console.error(`[Supabase] Edge Function "${name}" failed:`, error)
