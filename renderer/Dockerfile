@@ -10,11 +10,12 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
 COPY . ./
 
 ENV NODE_ENV=production
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV YTDLP_PATH=/usr/local/bin/yt-dlp
 
-CMD ["npm", "run", "pipeline:worker"]
+CMD ["npm", "run", "worker:all"]
