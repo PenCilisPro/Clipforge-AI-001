@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Upload, Loader2, FileVideo, X } from 'lucide-react'
 import { YoutubeIcon } from '@/components/icons'
 import { supabase, invokeFunction } from '@/lib/supabase'
-import { processProjectInBrowser } from '@/lib/clientProcessor'
 import { useAuth } from '@/hooks/useAuth'
 import type { PatternSet, DurationPreset } from '@/lib/types'
 import { formatFileSize, classNames } from '@/lib/format'
@@ -135,13 +134,16 @@ export default function CreateProject() {
         await supabase.from('projects').update({ status: 'QUEUED' }).eq('id', project.id)
       }
 
-      // 1. Invoke Supabase Edge function (if configured)
-      invokeFunction('process-video', { projectId: project.id }).catch(() => {})
-
-      // 2. Automatically trigger AI processing in parallel so Vercel deployments generate instantly
-      processProjectInBrowser(project.id).catch((e) => {
-        console.warn('Browser AI background processing notice:', e)
-      })
+      // Hand off to the real backend: the edge function marks the project QUEUED
+      // and the pipeline worker (renderer/pipeline.ts) picks it up and does the
+      // actual download/transcribe/analyze/render work, writing real status and
+      // progress updates back to the project row as it goes. We don't fake any
+      // of that client-side — the project detail page polls the real values.
+      try {
+        await invokeFunction('process-video', { projectId: project.id })
+      } catch (e) {
+        console.warn('process-video function call failed, project remains queued for the worker:', e)
+      }
 
       navigate(`/projects/${project.id}`)
     } catch (err) {

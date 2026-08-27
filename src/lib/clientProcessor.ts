@@ -1,3 +1,22 @@
+// ⚠️ DEPRECATED — not called anywhere in the app anymore.
+//
+// This module simulated the entire processing pipeline in the browser with
+// fixed, short `delay()` calls and marked projects COMPLETED after a few
+// seconds regardless of whether any real work happened. It was previously
+// fired in parallel with the real backend from CreateProject.tsx and
+// ProjectDetail.tsx, so the fake version almost always "finished" first and
+// the UI showed a completed project with placeholder clips instead of the
+// real backend's progress.
+//
+// The real pipeline now runs exclusively through:
+//   1. supabase/functions/process-video — marks the project QUEUED
+//   2. renderer/pipeline.ts (the Node worker) — claims QUEUED projects and
+//      performs the actual download/transcribe/analyze/render steps,
+//      writing real status + progress back to the `projects` row.
+// The frontend (ProjectDetail.tsx via ProcessingProgressTracker) polls that
+// real data. Do not reintroduce calls to processProjectInBrowser() — it
+// will start faking completion again.
+
 import { supabase } from './supabase'
 import type { Project, Pattern } from './types'
 import { resolveYoutubeStream } from './youtubeResolver'
