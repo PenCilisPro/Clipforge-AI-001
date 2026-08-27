@@ -463,6 +463,20 @@ async function syncProjectRenderProgress(
 
 // Primary downloader — free, no subscription/quota. Uses the yt-dlp binary
 // installed at build time by scripts/install-yt-dlp.mjs (see YTDLP_PATH).
+//
+// YouTube's default (web) client aggressively bot-checks requests from
+// datacenter IPs, which is exactly what a Railway container is — this
+// shows up as "Sign in to confirm you're not a bot". Two mitigations:
+//
+// 1. player_client=android: the Android client uses a different auth flow
+//    that isn't subject to the same web bot-check, and needs no JS runtime
+//    for signature decryption. Free, no setup, tried first automatically.
+// 2. Optional cookies from a real logged-in YouTube session, via the
+//    YTDLP_COOKIES env var (paste the full contents of a Netscape-format
+//    cookies.txt export). This is the standard fallback if (1) still gets
+//    blocked on some videos. Cookies do expire/rot over time and need
+//    periodic re-export — there's no fully "set and forget" way to make
+//    cloud-IP YouTube downloading 100% reliable.
 async function downloadViaYtDlp(
   youtubeUrl: string,
   outPath: string,
@@ -479,27 +493,76 @@ async function downloadViaYtDlp(
     `Attempting YouTube download via yt-dlp (${YTDLP_PATH})...`,
   );
 
+  let cookiesPath: string | null = null;
+
+  if (process.env.YTDLP_COOKIES) {
+    try {
+      cookiesPath = path.join(
+        path.dirname(outPath),
+        "cookies.txt",
+      );
+
+      writeFileSync(cookiesPath, process.env.YTDLP_COOKIES);
+    } catch (error) {
+      console.warn(
+        "Failed to write YTDLP_COOKIES to a temp file, continuing without cookies:",
+        error instanceof Error ? error.message : String(error),
+      );
+
+      cookiesPath = null;
+    }
+  }
+
+  const baseArgs = [
+    "--no-playlist",
+    "--no-part",
+    "--no-mtime",
+    "--merge-output-format",
+    "mp4",
+    "-f",
+    "bv*+ba/b",
+    "-o",
+    outPath,
+  ];
+
+  if (cookiesPath) {
+    baseArgs.push("--cookies", cookiesPath);
+  }
+
   try {
-    await execFileAsync(
-      YTDLP_PATH,
-      [
-        "--no-playlist",
-        "--no-part",
-        "--no-mtime",
-        "--merge-output-format",
-        "mp4",
-        "-f",
-        "bv*+ba/b",
-        "-o",
-        outPath,
-        youtubeUrl,
-      ],
-      { maxBuffer: 20 * 1024 * 1024 },
-    );
+    try {
+      // Attempt 1: Android client — usually sidesteps the web bot-check
+      // entirely, no cookies required.
+      await execFileAsync(
+        YTDLP_PATH,
+        [
+          ...baseArgs,
+          "--extractor-args",
+          "youtube:player_client=android",
+          youtubeUrl,
+        ],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
+    } catch (androidError) {
+      console.warn(
+        "yt-dlp (android client) failed, retrying with default client:",
+        androidError instanceof Error
+          ? androidError.message
+          : String(androidError),
+      );
+
+      // Attempt 2: default (web) client, with cookies if we have them.
+      await execFileAsync(
+        YTDLP_PATH,
+        [...baseArgs, youtubeUrl],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
+    }
 
     if (!existsSync(outPath)) {
       console.warn("yt-dlp finished but produced no output file.");
       return false;
+
     }
 
     const stats = statSync(outPath);
