@@ -24,22 +24,16 @@ function normalizePlan(raw: any, sourcePath: string | null): EditPlan {
     startTime: Number.isFinite(startTime) ? startTime : 0,
     endTime: Number.isFinite(endTime) && endTime > startTime ? endTime : startTime + 30,
     aspectRatio: '9:16',
-    resolution: raw?.resolution?.width && raw?.resolution?.height
-      ? raw.resolution
-      : { width: 1080, height: 1920 },
+    resolution: raw?.resolution?.width && raw?.resolution?.height ? raw.resolution : { width: 1080, height: 1920 },
     speed: Number(raw?.speed) || 1,
     crop: raw?.crop || { mode: 'center', x: 0.5, y: 0.5, scale: 1 },
     captions: {
       enabled: captions.enabled !== false,
-      style: captions.style || {
-        font: 'Inter', fontSize: 64, weight: 800, position: 'bottom',
-        textColor: '#FFFFFF', highlightColor: '#F97316', strokeColor: '#000000',
-        strokeWidth: 6, animation: 'pop',
-      },
+      style: captions.style || { font: 'Inter', fontSize: 64, weight: 800, position: 'bottom', textColor: '#FFFFFF', highlightColor: '#F97316', strokeColor: '#000000', strokeWidth: 6, animation: 'pop' },
       words: Array.isArray(captions.words) ? captions.words : [],
     },
     broll: broll.filter((x: any) => x && typeof x === 'object' && typeof x.videoUrl === 'string'),
-    music: music,
+    music,
     overlays: Array.isArray(raw?.overlays) ? raw.overlays : [],
     branding: raw?.branding || { logoUrl: null, watermarkText: null },
     originalVolume: Number(raw?.originalVolume ?? 1),
@@ -50,7 +44,7 @@ export async function queueReadyProjects(): Promise<number> {
   const { data: projects, error } = await supabase
     .from('projects')
     .select('id,status')
-    .in('status', ['QUEUED', 'FINDING_CLIPS', 'GENERATING_CONFIG', 'COMPLETED', 'RENDERING'])
+    .in('status', ['QUEUED', 'DOWNLOADING', 'EXTRACTING_AUDIO', 'TRANSCRIBING', 'ANALYZING', 'MATCHING_PATTERNS', 'FINDING_CLIPS', 'GENERATING_CONFIG', 'RENDERING'])
     .order('created_at', { ascending: true })
     .limit(20)
 
@@ -65,28 +59,12 @@ export async function queueReadyProjects(): Promise<number> {
     const { data: clips } = await supabase.from('clips').select('id').eq('project_id', project.id)
     if (!clips?.length) continue
 
-    const { data: video } = await supabase
-      .from('videos')
-      .select('storage_path')
-      .eq('project_id', project.id)
-      .maybeSingle()
-
+    const { data: video } = await supabase.from('videos').select('storage_path').eq('project_id', project.id).maybeSingle()
     const clipIds = clips.map((c) => c.id)
-    const { data: versions } = await supabase
-      .from('clip_versions')
-      .select('id,clip_id,configuration_json,version_number')
-      .in('clip_id', clipIds)
-      .order('version_number', { ascending: true })
+    const { data: versions } = await supabase.from('clip_versions').select('id,clip_id,configuration_json,version_number').in('clip_id', clipIds).order('version_number', { ascending: true })
 
     for (const version of versions || []) {
-      const { data: existing } = await supabase
-        .from('render_jobs')
-        .select('id,status')
-        .eq('clip_version_id', version.id)
-        .in('status', ['QUEUED', 'PREPARING', 'RENDERING', 'UPLOADING', 'COMPLETED'])
-        .limit(1)
-        .maybeSingle()
-
+      const { data: existing } = await supabase.from('render_jobs').select('id,status').eq('clip_version_id', version.id).in('status', ['QUEUED', 'PREPARING', 'RENDERING', 'UPLOADING', 'COMPLETED']).limit(1).maybeSingle()
       if (existing) continue
 
       const plan = normalizePlan(version.configuration_json, video?.storage_path || null)
@@ -95,11 +73,7 @@ export async function queueReadyProjects(): Promise<number> {
         continue
       }
 
-      const { error: configError } = await supabase
-        .from('clip_versions')
-        .update({ configuration_json: plan, status: 'QUEUED' })
-        .eq('id', version.id)
-
+      const { error: configError } = await supabase.from('clip_versions').update({ configuration_json: plan, status: 'QUEUED' }).eq('id', version.id)
       if (configError) {
         console.error(`[Remotion] failed to normalize version ${version.id}: ${configError.message}`)
         continue
@@ -113,7 +87,6 @@ export async function queueReadyProjects(): Promise<number> {
         stage: 'QUEUED_FOR_REMOTION',
         error_message: null,
       })
-
       if (jobError) {
         console.error(`[Remotion] failed to queue version ${version.id}: ${jobError.message}`)
         continue
@@ -123,11 +96,7 @@ export async function queueReadyProjects(): Promise<number> {
       await supabase.from('clips').update({ status: 'RENDERING' }).eq('id', version.clip_id)
     }
 
-    const { data: jobs } = await supabase
-      .from('render_jobs')
-      .select('status,progress')
-      .in('clip_id', clipIds)
-
+    const { data: jobs } = await supabase.from('render_jobs').select('status,progress').in('clip_id', clipIds)
     if (jobs?.length) {
       const failed = jobs.some((j) => j.status === 'FAILED')
       const completed = jobs.filter((j) => j.status === 'COMPLETED').length
