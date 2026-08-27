@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "studio": "remotion studio src/index.ts",
-    "worker": "tsx ffmpegWorkerV2.ts",
-    "worker:raw": "tsx ffmpegWorkerV2.ts",
+    "worker": "tsx ffmpegWorkerFinal.ts",
+    "worker:raw": "tsx ffmpegWorkerFinal.ts",
     "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline.ts",
     "typecheck": "tsc --noEmit"
   },
