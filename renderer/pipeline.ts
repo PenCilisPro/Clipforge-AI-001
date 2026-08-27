@@ -2,11 +2,14 @@
 //
 // Pipeline:
 // 1. Claim QUEUED project
-// 2. Download source video
-// 3. Probe source
-// 4. Analyze video with Claude
-// 5. Create clip records
-// 6. Prepare clip source + Whisper captions + B-roll + music
+// 2. Download the full source video (YouTube or uploaded file)
+// 3. Probe source, extract full audio, transcribe the WHOLE video with
+//    Whisper, and save that transcript (used for the "View Transcript" UI)
+// 4. Send the transcript to Claude so it picks the best moments based on
+//    actual content, not just the title
+// 5. Create clip records for each candidate moment
+// 6. Slice each clip with ffmpeg, transcribe the clipped audio with Whisper
+//    for burned-in captions, and find B-roll + music
 // 7. Create clip_versions as QUEUED
 // 8. Create render_jobs as QUEUED
 // 9. Wait for Remotion worker
@@ -818,6 +821,163 @@ async function probeVideo(
 }
 
 // ============================================================================
+// FULL-VIDEO AUDIO EXTRACTION
+// ============================================================================
+
+async function extractFullAudio(
+  sourceVideoPath: string,
+  outAudioPath: string,
+): Promise<string> {
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+      "-i",
+      sourceVideoPath,
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-b:a",
+      "64k",
+      outAudioPath,
+    ],
+  );
+
+  return outAudioPath;
+}
+
+// ============================================================================
+// FULL-VIDEO WHISPER TRANSCRIPT
+// ============================================================================
+//
+// This transcribes the ENTIRE source video (not an individual clip) so that
+// Claude can pick moments based on what is actually said, instead of only
+// the project title. It also gives us a real transcript to store for the
+// "View Transcript" UI.
+//
+// Note: the OpenAI transcription endpoint caps uploads at 25MB. At 64kbps
+// mono that's roughly ~50 minutes of audio. Very long source videos may
+// exceed that and fail gracefully (Claude then falls back to duration-based
+// candidates, same as before this change).
+
+interface FullTranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+async function transcribeFullVideo(
+  fullAudioPath: string,
+): Promise<{
+  segments: FullTranscriptSegment[];
+  fullText: string;
+} | null> {
+  try {
+    const stats = statSync(fullAudioPath);
+
+    const MAX_UPLOAD_BYTES = 24 * 1024 * 1024;
+
+    if (stats.size > MAX_UPLOAD_BYTES) {
+      console.warn(
+        `Full-video audio is ${Math.round(
+          stats.size / 1024 / 1024,
+        )}MB, over the Whisper upload limit — skipping full transcript.`,
+      );
+
+      return null;
+    }
+
+    const form = new FormData();
+
+    const audioBuffer = readFileSync(fullAudioPath);
+
+    form.append(
+      "file",
+      new Blob([audioBuffer], { type: "audio/mpeg" }),
+      "source.mp3",
+    );
+
+    form.append("model", "whisper-1");
+    form.append("response_format", "verbose_json");
+    form.append("timestamp_granularities[]", "segment");
+
+    const response = await fetch(
+      "https://api.openai.com/v1/audio/transcriptions",
+      {
+        method: "POST",
+        headers: openAiHeaders,
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+
+      console.warn(
+        `Full-video Whisper transcription returned ${response.status}: ${errorText}`,
+      );
+
+      return null;
+    }
+
+    const data = (await response.json()) as any;
+
+    const segments: FullTranscriptSegment[] = (
+      data.segments ?? []
+    ).map((segment: any) => ({
+      start: Number(Number(segment.start).toFixed(2)),
+      end: Number(Number(segment.end).toFixed(2)),
+      text: String(segment.text || "").trim(),
+    }));
+
+    return {
+      segments,
+      fullText: String(data.text || "").trim(),
+    };
+  } catch (error) {
+    console.warn(
+      "Full-video Whisper transcription failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+
+    return null;
+  }
+}
+
+async function saveFullTranscript(
+  projectId: string,
+  transcript: {
+    segments: FullTranscriptSegment[];
+    fullText: string;
+  } | null,
+): Promise<void> {
+  if (!transcript) return;
+
+  // Clear any transcript from a previous run of this project before
+  // inserting the fresh one (there's no unique constraint on project_id to
+  // upsert against).
+  await supabase
+    .from("transcripts")
+    .delete()
+    .eq("project_id", projectId);
+
+  const { error } = await supabase.from("transcripts").insert({
+    project_id: projectId,
+    language: "en",
+    full_text: transcript.fullText,
+    segments: transcript.segments,
+  });
+
+  if (error) {
+    console.warn(
+      `Failed to save full transcript: ${error.message}`,
+    );
+  }
+}
+
+// ============================================================================
 // CLAUDE CANDIDATE DETECTION
 // ============================================================================
 
@@ -826,6 +986,10 @@ async function findMomentsWithClaude(
   title: string,
   duration: number,
   patterns: PatternRow[],
+  transcript: {
+    segments: FullTranscriptSegment[];
+    fullText: string;
+  } | null,
 ): Promise<Candidate[]> {
   const targetCount = Math.min(
     Math.max(project.max_clips || 6, 1),
@@ -851,6 +1015,31 @@ async function findMomentsWithClaude(
           .join("\n")
       : "No predefined patterns are available.";
 
+  // Claude can't watch the video, so the transcript is what lets it pick
+  // moments based on actual content instead of guessing blind from the
+  // title. Cap the size sent to keep the request well inside a normal
+  // context window even for long source videos.
+  const MAX_TRANSCRIPT_CHARS = 60000;
+
+  const transcriptText =
+    transcript && transcript.segments.length > 0
+      ? transcript.segments
+          .map(
+            (segment) =>
+              `[${segment.start.toFixed(1)}s - ${segment.end.toFixed(1)}s] ${segment.text}`,
+          )
+          .join("\n")
+          .slice(0, MAX_TRANSCRIPT_CHARS)
+      : null;
+
+  const transcriptBlock = transcriptText
+    ? `Timestamped transcript of the full video (use these exact timestamps — do not shift them):\n${transcriptText}${
+        transcriptText.length >= MAX_TRANSCRIPT_CHARS
+          ? "\n[transcript truncated for length]"
+          : ""
+      }`
+    : "No transcript is available for this video (transcription failed or was skipped). Base your picks on the title and duration only, and keep timestamps conservative.";
+
   const prompt = `
 You are ClipForge AI, an expert video clipping and viral retention specialist.
 
@@ -869,16 +1058,23 @@ ${targetCount}
 Available viral hook patterns:
 ${patternText}
 
+${transcriptBlock}
+
 Find the best ${targetCount} moments that could perform well as:
 - YouTube Shorts
 - TikTok
 - Instagram Reels
+
+Base your selections on what is actually said in the transcript above — favor
+strong hooks, self-contained stories, surprising claims, useful advice, or
+emotional peaks that appear in the text, not just generic guesses.
 
 Important:
 - Timestamps must be inside the source video.
 - start must be >= 0.
 - end must be greater than start.
 - end must be <= ${duration}.
+- Use the transcript's timestamps as ground truth for where content occurs.
 - Prefer complete thoughts.
 - Prefer strong hooks.
 - Avoid starting in the middle of a sentence.
@@ -1725,7 +1921,68 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 2. AI ANALYSIS
+    // 2. FULL-VIDEO AUDIO EXTRACTION + TRANSCRIPTION
+    // ----------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "EXTRACTING_AUDIO",
+      18,
+      null,
+    );
+
+    const fullAudioPath = path.join(
+      workDir,
+      "source_audio.mp3",
+    );
+
+    let fullTranscript: {
+      segments: FullTranscriptSegment[];
+      fullText: string;
+    } | null = null;
+
+    try {
+      await extractFullAudio(
+        sourceVideoPath,
+        fullAudioPath,
+      );
+
+      await setStatus(
+        project.id,
+        "TRANSCRIBING",
+        28,
+        null,
+      );
+
+      fullTranscript = await transcribeFullVideo(
+        fullAudioPath,
+      );
+
+      if (fullTranscript) {
+        console.log(
+          `Transcribed full video: ${fullTranscript.segments.length} segments.`,
+        );
+      } else {
+        console.warn(
+          "No full-video transcript available; Claude will fall back to title-only analysis.",
+        );
+      }
+
+      await saveFullTranscript(
+        project.id,
+        fullTranscript,
+      );
+    } catch (error) {
+      console.warn(
+        "Full-video audio extraction/transcription failed:",
+        error instanceof Error
+          ? error.message
+          : String(error),
+      );
+    }
+
+    // ----------------------------------------------------------------------
+    // 3. AI ANALYSIS
     // ----------------------------------------------------------------------
 
     await setStatus(
@@ -1771,6 +2028,7 @@ async function processProject(
         project.name,
         meta.duration,
         patterns,
+        fullTranscript,
       );
 
     console.log(
@@ -1784,12 +2042,15 @@ async function processProject(
     }
 
     // ----------------------------------------------------------------------
-    // 3. PREPARE CLIPS
+    // 4. PREPARE CLIPS
     // ----------------------------------------------------------------------
 
+    // "GENERATING_CONFIG" matches the frontend's "Clip Generation" step
+    // (ffmpeg slicing + per-clip Whisper captions + B-roll + music all
+    // happen inside this per-clip loop below).
     await setStatus(
       project.id,
-      "CLIPPING_AND_TRANSCRIBING",
+      "GENERATING_CONFIG",
       PREPARATION_START,
       null,
     );
@@ -2140,14 +2401,14 @@ async function processProject(
 
       await setStatus(
         project.id,
-        "PREPARING_RENDERS",
+        "GENERATING_CONFIG",
         preparationProgress,
         null,
       );
     }
 
     // ----------------------------------------------------------------------
-    // 4. VERIFY JOBS
+    // 5. VERIFY JOBS
     // ----------------------------------------------------------------------
 
     if (
@@ -2163,7 +2424,7 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 5. HAND OFF TO REMOTION
+    // 6. HAND OFF TO REMOTION
     // ----------------------------------------------------------------------
 
     await setStatus(
@@ -2174,7 +2435,7 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 6. WAIT FOR ONLY THESE REMOTION JOBS
+    // 7. WAIT FOR ONLY THESE REMOTION JOBS
     // ----------------------------------------------------------------------
 
     await waitForRemotionRenders(
