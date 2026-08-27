@@ -3,7 +3,6 @@ import { AuthProvider } from '@/hooks/useAuth'
 import { isSupabaseConfigured } from '@/lib/supabase'
 import ProtectedRoute from '@/components/ProtectedRoute'
 import Layout from '@/components/Layout'
-import RenderStatusBanner from '@/components/RenderStatusBanner'
 import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
 import CreateProject from '@/pages/CreateProject'
@@ -50,22 +49,22 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route element={<ProtectedRoute />}>
             <Route element={<Layout />}>
-              <Route path="/" element={<><RenderStatusBanner /><Dashboard /></>} />
-              <Route path="/create" element={<><RenderStatusBanner /><CreateProject /></>} />
-              <Route path="/projects" element={<><RenderStatusBanner /><Projects /></>} />
-              <Route path="/projects/:projectId" element={<><RenderStatusBanner /><ProjectDetail /></>} />
-              <Route path="/clips" element={<><RenderStatusBanner /><Clips /></>} />
-              <Route path="/clips/:clipId/studio" element={<><RenderStatusBanner /><ClipStudio /></>} />
-              <Route path="/calendar" element={<><RenderStatusBanner /><CalendarPage /></>} />
-              <Route path="/media" element={<><RenderStatusBanner /><MediaLibrary /></>} />
-              <Route path="/ai" element={<><RenderStatusBanner /><AIPage /></>} />
-              <Route path="/patterns" element={<><RenderStatusBanner /><PatternLibrary /></>} />
-              <Route path="/csv-import" element={<><RenderStatusBanner /><CSVImport /></>} />
-              <Route path="/analytics" element={<><RenderStatusBanner /><Analytics /></>} />
-              <Route path="/settings" element={<><RenderStatusBanner /><SettingsPage /></>} />
-              <Route path="/feedback" element={<><RenderStatusBanner /><FeedbackPage /></>} />
-              <Route path="/admin/feedback" element={<><RenderStatusBanner /><AdminFeedbackPage /></>} />
-              <Route path="/privacy" element={<><RenderStatusBanner /><PrivacyPolicy /></>} />
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/create" element={<CreateProject />} />
+              <Route path="/projects" element={<Projects />} />
+              <Route path="/projects/:projectId" element={<ProjectDetail />} />
+              <Route path="/clips" element={<Clips />} />
+              <Route path="/clips/:clipId/studio" element={<ClipStudio />} />
+              <Route path="/calendar" element={<CalendarPage />} />
+              <Route path="/media" element={<MediaLibrary />} />
+              <Route path="/ai" element={<AIPage />} />
+              <Route path="/patterns" element={<PatternLibrary />} />
+              <Route path="/csv-import" element={<CSVImport />} />
+              <Route path="/analytics" element={<Analytics />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/feedback" element={<FeedbackPage />} />
+              <Route path="/admin/feedback" element={<AdminFeedbackPage />} />
+              <Route path="/privacy" element={<PrivacyPolicy />} />
             </Route>
           </Route>
         </Routes>
