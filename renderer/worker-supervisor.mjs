@@ -2,9 +2,10 @@ import { spawn } from "node:child_process";
 
 const children = new Set();
 let shuttingDown = false;
+const tsx = "./node_modules/.bin/tsx";
 
 function start(name, args) {
-  const child = spawn("npx", args, {
+  const child = spawn(tsx, args, {
     cwd: process.cwd(),
     stdio: "inherit",
     shell: false,
@@ -35,12 +36,13 @@ console.log("ClipForge dedicated worker supervisor started.");
 console.log("Starting pipeline worker + source/render worker...");
 
 // pipeline.ts claims QUEUED projects, downloads/analyzes them, creates
-// render_jobs, and waits for those jobs to finish.
-start("pipeline", ["tsx", "--import", "./rapidApiFetchFallback.ts", "pipeline.ts"]);
+// render_jobs, and waits for those jobs to finish. The import hook enables
+// RapidAPI -> yt-dlp fallback for YouTube source downloads.
+start("pipeline", ["--import", "./rapidApiFetchFallback.ts", "pipeline.ts"]);
 
 // sourceRepair.ts repairs missing sourceVideo values and launches the
 // Remotion render worker for QUEUED render jobs.
-start("source-repair/render", ["tsx", "sourceRepair.ts"]);
+start("source-repair/render", ["sourceRepair.ts"]);
 
 function shutdown(signal) {
   if (shuttingDown) return;
