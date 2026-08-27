@@ -9,6 +9,7 @@
     "worker:raw": "tsx worker.ts",
     "pipeline": "tsx --import ./rapidApiFetchFallback.ts pipeline.ts",
     "pipeline:worker": "tsx --import ./rapidApiFetchFallback.ts worker.ts",
+    "worker:all": "node worker-supervisor.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
