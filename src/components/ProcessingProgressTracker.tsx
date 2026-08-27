@@ -21,48 +21,12 @@ export interface ProgressStep {
 }
 
 const PIPELINE_STEPS: ProgressStep[] = [
-  {
-    id: 'download',
-    label: 'Download Video',
-    description: 'Fetching the source video and preparing the local media file.',
-    icon: Download,
-    matchStatuses: ['UPLOADING', 'QUEUED', 'DOWNLOADING'],
-  },
-  {
-    id: 'audio',
-    label: 'Extract Audio',
-    description: 'Preparing the audio stream for transcription and analysis.',
-    icon: Mic,
-    matchStatuses: ['EXTRACTING_AUDIO'],
-  },
-  {
-    id: 'transcribe',
-    label: 'AI Transcription',
-    description: 'Generating timestamped speech-to-text data.',
-    icon: FileText,
-    matchStatuses: ['TRANSCRIBING'],
-  },
-  {
-    id: 'analyze',
-    label: 'Viral Pattern Analysis',
-    description: 'Finding and scoring the strongest clip candidates.',
-    icon: Sparkles,
-    matchStatuses: ['ANALYZING', 'MATCHING_PATTERNS', 'FINDING_CLIPS'],
-  },
-  {
-    id: 'clips',
-    label: 'Clip Generation',
-    description: 'Preparing the clip configuration, captions, B-roll and music.',
-    icon: Scissors,
-    matchStatuses: ['GENERATING_CONFIG', 'FINDING_BROLL', 'ADDING_MUSIC'],
-  },
-  {
-    id: 'render',
-    label: 'Video Rendering',
-    description: 'FFmpeg / Remotion is rendering the actual finished video.',
-    icon: Scissors,
-    matchStatuses: ['RENDERING', 'ADDING_CAPTIONS', 'UPLOADING_RENDER'],
-  },
+  { id: 'download', label: 'Download Video', description: 'Fetching the source video and preparing the local media file.', icon: Download, matchStatuses: ['UPLOADING', 'QUEUED', 'DOWNLOADING'] },
+  { id: 'audio', label: 'Extract Audio', description: 'Preparing the audio stream for transcription and analysis.', icon: Mic, matchStatuses: ['EXTRACTING_AUDIO'] },
+  { id: 'transcribe', label: 'AI Transcription', description: 'Generating timestamped speech-to-text data.', icon: FileText, matchStatuses: ['TRANSCRIBING'] },
+  { id: 'analyze', label: 'Viral Pattern Analysis', description: 'Finding and scoring the strongest clip candidates.', icon: Sparkles, matchStatuses: ['ANALYZING', 'MATCHING_PATTERNS', 'FINDING_CLIPS'] },
+  { id: 'clips', label: 'Clip Generation', description: 'Preparing clip configuration, captions, B-roll and music.', icon: Scissors, matchStatuses: ['GENERATING_CONFIG', 'FINDING_BROLL', 'ADDING_MUSIC'] },
+  { id: 'render', label: 'Video Rendering', description: 'FFmpeg / Remotion renders the actual finished video.', icon: Scissors, matchStatuses: ['RENDERING', 'ADDING_CAPTIONS', 'UPLOADING_RENDER'] },
 ]
 
 const STATUS_DETAILS: Partial<Record<ProcessingStatus, string>> = {
@@ -77,7 +41,7 @@ const STATUS_DETAILS: Partial<Record<ProcessingStatus, string>> = {
   GENERATING_CONFIG: 'Preparing the final clip configurations...',
   FINDING_BROLL: 'Finding synchronized B-roll footage...',
   ADDING_MUSIC: 'Preparing the selected background music...',
-  RENDERING: 'FFmpeg / Remotion is actively rendering the video...',
+  RENDERING: 'Rendering is active. Progress below comes from the backend render jobs.',
   ADDING_CAPTIONS: 'Adding captions during the render pipeline...',
   UPLOADING_RENDER: 'Uploading the finished rendered MP4...',
   COMPLETED: 'The finished video has been rendered and uploaded successfully.',
@@ -86,19 +50,24 @@ const STATUS_DETAILS: Partial<Record<ProcessingStatus, string>> = {
 export function ProcessingProgressTracker({
   status,
   progress,
+  renderProgress,
   onRunAiNow,
   isProcessingNow,
   errorMessage,
 }: {
   status: ProcessingStatus
   progress: number
+  renderProgress?: number | null
   onRunAiNow?: () => void
   isProcessingNow?: boolean
   errorMessage?: string | null
 }) {
   const isFailed = status === 'FAILED'
   const isComplete = status === 'COMPLETED'
-  const safeProgress = Math.max(0, Math.min(100, Number.isFinite(Number(progress)) ? Number(progress) : 0))
+  const pipelineProgress = Math.max(0, Math.min(100, Number.isFinite(Number(progress)) ? Number(progress) : 0))
+  const backendRenderProgress = Math.max(0, Math.min(100, Number.isFinite(Number(renderProgress)) ? Number(renderProgress) : 0))
+  const isRenderStage = ['RENDERING', 'ADDING_CAPTIONS', 'UPLOADING_RENDER'].includes(status)
+  const displayProgress = isComplete ? 100 : isRenderStage ? backendRenderProgress : pipelineProgress
 
   let activeStepIndex = 0
   if (isComplete) {
@@ -117,52 +86,30 @@ export function ProcessingProgressTracker({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-500/10 text-brand-400">
-              {isComplete ? (
-                <CheckCircle2 className="h-6 w-6 text-emerald-400" />
-              ) : isFailed ? (
-                <AlertCircle className="h-6 w-6 text-rose-400" />
-              ) : (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              )}
+              {isComplete ? <CheckCircle2 className="h-6 w-6 text-emerald-400" /> : isFailed ? <AlertCircle className="h-6 w-6 text-rose-400" /> : <Loader2 className="h-5 w-5 animate-spin" />}
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="font-semibold text-zinc-100">
-                  {isComplete
-                    ? 'Processing Complete'
-                    : isFailed
-                      ? 'Processing Interrupted'
-                      : currentStep?.label ?? 'Waiting to process'}
-                </h3>
-                <span className="rounded-md bg-surface-800 px-2 py-0.5 text-xs font-semibold tabular-nums text-brand-400">
-                  {Math.round(safeProgress)}%
-                </span>
+                <h3 className="font-semibold text-zinc-100">{isComplete ? 'Processing Complete' : isFailed ? 'Processing Interrupted' : currentStep?.label ?? 'Waiting to process'}</h3>
+                <span className="rounded-md bg-surface-800 px-2 py-0.5 text-xs font-semibold tabular-nums text-brand-400">{Math.round(displayProgress)}%</span>
               </div>
               <p className="mt-0.5 text-xs text-zinc-400">{statusText}</p>
             </div>
           </div>
 
           {onRunAiNow && isFailed && (
-            <button
-              type="button"
-              onClick={onRunAiNow}
-              disabled={isProcessingNow}
-              className="btn-primary !px-3.5 !py-1.5 text-xs font-medium flex items-center gap-1.5"
-            >
+            <button type="button" onClick={onRunAiNow} disabled={isProcessingNow} className="btn-primary !px-3.5 !py-1.5 text-xs font-medium flex items-center gap-1.5">
               {isProcessingNow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
               {isProcessingNow ? 'Retrying...' : 'Retry'}
             </button>
           )}
         </div>
 
-        <div className="mt-4" aria-label={`Processing progress: ${Math.round(safeProgress)} percent`}>
+        <div className="mt-4" aria-label={`Processing progress: ${Math.round(displayProgress)} percent`}>
           <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-surface-800">
             <div
-              className={classNames(
-                'h-full rounded-full transition-all duration-700 ease-out',
-                isFailed ? 'bg-rose-500' : isComplete ? 'bg-emerald-500' : 'bg-gradient-to-r from-brand-600 via-brand-500 to-indigo-400',
-              )}
-              style={{ width: `${safeProgress}%` }}
+              className={classNames('h-full rounded-full transition-all duration-700 ease-out', isFailed ? 'bg-rose-500' : isComplete ? 'bg-emerald-500' : 'bg-gradient-to-r from-brand-600 via-brand-500 to-indigo-400')}
+              style={{ width: `${displayProgress}%` }}
             />
           </div>
         </div>
@@ -173,44 +120,24 @@ export function ProcessingProgressTracker({
           const Icon = step.icon
           const isDone = isComplete || idx < activeStepIndex
           const isCurrent = !isComplete && !isFailed && idx === activeStepIndex
+          const stepProgress = isCurrent && isRenderStage ? backendRenderProgress : isDone ? 100 : 0
 
           return (
-            <div
-              key={step.id}
-              className={classNames('relative flex min-h-[150px] flex-col justify-between p-4', isCurrent ? 'bg-brand-500/5' : '')}
-            >
+            <div key={step.id} className={classNames('relative flex min-h-[150px] flex-col justify-between p-4', isCurrent ? 'bg-brand-500/5' : '')}>
               <div className="flex items-center justify-between">
-                <div
-                  className={classNames(
-                    'flex h-7 w-7 items-center justify-center rounded-lg text-xs font-bold',
-                    isDone ? 'bg-emerald-500/20 text-emerald-400' : isCurrent ? 'bg-brand-500 text-white' : 'bg-surface-800 text-zinc-500',
-                  )}
-                >
+                <div className={classNames('flex h-7 w-7 items-center justify-center rounded-lg text-xs font-bold', isDone ? 'bg-emerald-500/20 text-emerald-400' : isCurrent ? 'bg-brand-500 text-white' : 'bg-surface-800 text-zinc-500')}>
                   {isDone ? <CheckCircle2 className="h-4 w-4" /> : idx + 1}
                 </div>
-                <Icon
-                  className={classNames(
-                    'h-4 w-4',
-                    isDone ? 'text-emerald-400' : isCurrent ? 'animate-pulse text-brand-400' : 'text-zinc-600',
-                  )}
-                />
+                <Icon className={classNames('h-4 w-4', isDone ? 'text-emerald-400' : isCurrent ? 'animate-pulse text-brand-400' : 'text-zinc-600')} />
               </div>
 
               <div className="mt-3">
-                <span className={classNames('text-xs font-semibold', isDone ? 'text-zinc-200' : isCurrent ? 'text-brand-300' : 'text-zinc-500')}>
-                  {step.label}
-                </span>
+                <span className={classNames('text-xs font-semibold', isDone ? 'text-zinc-200' : isCurrent ? 'text-brand-300' : 'text-zinc-500')}>{step.label}</span>
                 <p className="mt-1 line-clamp-3 text-[11px] leading-snug text-zinc-500">{step.description}</p>
               </div>
 
               <div className="mt-2 text-[10px] font-medium">
-                {isDone ? (
-                  <span className="text-emerald-400">Completed ✓</span>
-                ) : isCurrent ? (
-                  <span className="text-brand-400">In progress · backend reports {Math.round(safeProgress)}%</span>
-                ) : (
-                  <span className="text-zinc-600">Not started · 0%</span>
-                )}
+                {isDone ? <span className="text-emerald-400">Completed · 100%</span> : isCurrent ? <span className="text-brand-400">In progress · {Math.round(stepProgress)}%</span> : <span className="text-zinc-600">Not started · 0%</span>}
               </div>
             </div>
           )
