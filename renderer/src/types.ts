@@ -25,6 +25,7 @@ export interface EditPlan {
   startTime: number
   endTime: number
   speed?: number
+  resolution?: { width: 1080 | 720; height: 1920 | 1280 }
   crop?: {
     mode?: 'smart' | 'center' | 'manual'
     x?: number
