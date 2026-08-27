@@ -54,13 +54,7 @@ const MusicTrack: React.FC<{ config: ClipConfiguration }> = ({ config }) => {
     Math.min(1.5, baseVolume * duckMultiplier * fadeInMultiplier * fadeOutMultiplier),
   )
 
-  return (
-    <Audio
-      src={music.audioUrl}
-      volume={calculatedVolume}
-      startFrom={Math.round((music.trimStart || 0) * FPS)}
-    />
-  )
+  return <Audio src={music.audioUrl} volume={calculatedVolume} startFrom={Math.round((music.trimStart || 0) * FPS)} />
 }
 
 const isDirectVideo = (url?: string | null): boolean => {
@@ -72,9 +66,7 @@ const isDirectVideo = (url?: string | null): boolean => {
     lower.includes('youtu.be/') ||
     lower.includes('vimeo.com/') ||
     lower.includes('tiktok.com/')
-  ) {
-    return false
-  }
+  ) return false
   if (
     lower.endsWith('.jpg') ||
     lower.endsWith('.jpeg') ||
@@ -84,9 +76,7 @@ const isDirectVideo = (url?: string | null): boolean => {
     lower.includes('images.unsplash.com') ||
     lower.includes('i.ytimg.com') ||
     lower.includes('ytimg.com')
-  ) {
-    return false
-  }
+  ) return false
   return (
     lower.includes('.mp4') ||
     lower.includes('.webm') ||
@@ -101,16 +91,20 @@ const isDirectVideo = (url?: string | null): boolean => {
   )
 }
 
+const isKnownBlockedBrollUrl = (url?: string | null): boolean => {
+  if (!url) return true
+  const lower = url.trim().toLowerCase()
+  // Mixkit preview assets can return 403 to headless renderers. Do not let one
+  // unavailable stock asset abort the entire render; the clip continues without it.
+  return lower.includes('assets.mixkit.co/')
+}
+
 const getResolvedThumbnail = (config: ClipConfiguration): string => {
   if (config.thumbnailUrl) return config.thumbnailUrl
-  if (config.youtubeVideoId) {
-    return `https://i.ytimg.com/vi/${config.youtubeVideoId}/hqdefault.jpg`
-  }
+  if (config.youtubeVideoId) return `https://i.ytimg.com/vi/${config.youtubeVideoId}/hqdefault.jpg`
   const raw = config.sourceVideo || ''
   const ytMatch = raw.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/)
-  if (ytMatch) {
-    return `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`
-  }
+  if (ytMatch) return `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`
   return 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1280&q=80'
 }
 
@@ -118,7 +112,6 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const frame = useCurrentFrame()
   const { width, height } = useVideoConfig()
 
-  // Smart reframing: position the crop window over the detected subject.
   const cropX = config.crop.mode === 'center' ? 0.5 : config.crop.x
   const cropY = config.crop.mode === 'center' ? 0.5 : config.crop.y
 
@@ -129,6 +122,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
   const rawSourceVideo = (config.sourceVideo || '').trim()
   const isDirect = isDirectVideo(rawSourceVideo)
   const resolvedThumbnail = getResolvedThumbnail(config)
+  const safeBroll = (config.broll || []).filter((b) => !isKnownBlockedBrollUrl(b.videoUrl))
 
   const kenBurnsScale = interpolate(frame, [0, Math.max(30, durationInFrames)], [1.02, 1.15], {
     extrapolateLeft: 'clamp',
@@ -141,7 +135,6 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#090B10' }}>
-      {/* 1. Underlying Cinematic Footage / Motion Visual Engine */}
       <AbsoluteFill style={{ overflow: 'hidden' }}>
         <Img
           src={resolvedThumbnail}
@@ -156,17 +149,7 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             transform: `scale(${kenBurnsScale})`,
           }}
         />
-
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            overflow: 'hidden',
-          }}
-        >
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
           <Img
             src={resolvedThumbnail}
             style={{
@@ -179,18 +162,9 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             }}
           />
         </div>
-
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background:
-              'linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0.2) 65%, rgba(0,0,0,0.85) 100%)',
-          }}
-        />
+        <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0.2) 65%, rgba(0,0,0,0.85) 100%)' }} />
       </AbsoluteFill>
 
-      {/* 2. Direct Video Player Layer if source is raw MP4/WebM */}
       {isDirect && (
         <AbsoluteFill style={{ overflow: 'hidden' }}>
           <OffthreadVideo
@@ -199,87 +173,38 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
             endAt={endFrame}
             playbackRate={config.speed || 1}
             volume={config.originalVolume ?? 1}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              objectPosition: `${cropX * 100}% ${cropY * 100}%`,
-              transform: `scale(${config.crop.scale})`,
-            }}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: `${cropX * 100}% ${cropY * 100}%`, transform: `scale(${config.crop.scale})` }}
           />
         </AbsoluteFill>
       )}
 
-      {/* Standalone original audio stream if video has no embedded audio or source is audio-only */}
       {config.originalAudioUrl && config.originalAudioUrl !== rawSourceVideo && (
-        <Audio
-          src={config.originalAudioUrl}
-          startFrom={startFrame}
-          endAt={endFrame}
-          volume={config.originalVolume ?? 1}
-        />
+        <Audio src={config.originalAudioUrl} startFrom={startFrame} endAt={endFrame} volume={config.originalVolume ?? 1} />
       )}
+      {config.voiceUrl && <Audio src={config.voiceUrl} volume={config.voiceover?.volume ?? config.voiceVolume ?? 1} />}
 
-      {/* Synchronized AI voiceover audio narration */}
-      {config.voiceUrl && (
-        <Audio
-          src={config.voiceUrl}
-          volume={config.voiceover?.volume ?? config.voiceVolume ?? 1}
-        />
-      )}
-
-      {config.broll.map((b, i) => (
-        <Sequence
-          key={i}
-          from={Math.round(b.startAt * FPS)}
-          durationInFrames={Math.max(1, Math.round(b.duration * FPS))}
-        >
+      {safeBroll.map((b, i) => (
+        <Sequence key={i} from={Math.round(b.startAt * FPS)} durationInFrames={Math.max(1, Math.round(b.duration * FPS))}>
           <AbsoluteFill>
-            <OffthreadVideo
-              src={b.videoUrl}
-              muted
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
+            <OffthreadVideo src={b.videoUrl} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           </AbsoluteFill>
         </Sequence>
       ))}
 
       {config.captions.enabled && config.captions.words.length > 0 && (
-        <Captions
-          words={config.captions.words}
-          style={config.captions.style}
-          clipStart={config.startTime}
-        />
+        <Captions words={config.captions.words} style={config.captions.style} clipStart={config.startTime} />
       )}
 
       {config.overlays.map((overlay, i) => (
-        <Sequence
-          key={`overlay-${i}`}
-          from={Math.round(overlay.startAt * FPS)}
-          durationInFrames={Math.max(1, Math.round(overlay.duration * FPS))}
-        >
+        <Sequence key={`overlay-${i}`} from={Math.round(overlay.startAt * FPS)} durationInFrames={Math.max(1, Math.round(overlay.duration * FPS))}>
           <AbsoluteFill
             style={{
-              justifyContent:
-                overlay.position === 'top'
-                  ? 'flex-start'
-                  : overlay.position === 'center'
-                    ? 'center'
-                    : 'flex-end',
+              justifyContent: overlay.position === 'top' ? 'flex-start' : overlay.position === 'center' ? 'center' : 'flex-end',
               alignItems: 'center',
               padding: 120,
             }}
           >
-            <div
-              style={{
-                color: overlay.color,
-                fontSize: 56,
-                fontWeight: 800,
-                fontFamily: 'Inter, sans-serif',
-                textAlign: 'center',
-                textShadow: '0 2px 12px rgba(0,0,0,0.6)',
-              }}
-            >
+            <div style={{ color: overlay.color, fontSize: 56, fontWeight: 800, fontFamily: 'Inter, sans-serif', textAlign: 'center', textShadow: '0 2px 12px rgba(0,0,0,0.6)' }}>
               {overlay.text}
             </div>
           </AbsoluteFill>
@@ -287,30 +212,10 @@ export const ClipComposition: React.FC<{ config: ClipConfiguration }> = ({ confi
       ))}
 
       {config.branding.logoUrl && (
-        <Img
-          src={config.branding.logoUrl}
-          style={{
-            position: 'absolute',
-            top: 48,
-            right: 48,
-            width: width * 0.12,
-            opacity: 0.9,
-          }}
-        />
+        <Img src={config.branding.logoUrl} style={{ position: 'absolute', top: 48, right: 48, width: width * 0.12, opacity: 0.9 }} />
       )}
-
       {config.branding.watermarkText && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 40,
-            right: 48,
-            color: 'rgba(255,255,255,0.6)',
-            fontSize: height * 0.016,
-            fontFamily: 'Inter, sans-serif',
-            fontWeight: 600,
-          }}
-        >
+        <div style={{ position: 'absolute', bottom: 40, right: 48, color: 'rgba(255,255,255,0.6)', fontSize: height * 0.016, fontFamily: 'Inter, sans-serif', fontWeight: 600 }}>
           {config.branding.watermarkText}
         </div>
       )}
