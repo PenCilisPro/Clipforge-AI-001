@@ -12,23 +12,38 @@ export default function Projects() {
   const [videos, setVideos] = useState<Record<string, Video>>({})
 
   useEffect(() => {
-    void (async () => {
+    let cancelled = false
+
+    const load = async () => {
       const { data } = await supabase
         .from('projects')
         .select('*')
         .order('created_at', { ascending: false })
+
+      if (cancelled) return
+
       const list = (data as Project[]) ?? []
       setProjects(list)
+
       if (list.length > 0) {
         const { data: vids } = await supabase
           .from('videos')
           .select('*')
           .in('project_id', list.map((p) => p.id))
+        if (cancelled) return
+
         const byProject: Record<string, Video> = {}
         for (const v of (vids as Video[]) ?? []) byProject[v.project_id] = v
         setVideos(byProject)
       }
-    })()
+    }
+
+    void load()
+    const interval = setInterval(() => void load(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [])
 
   if (!projects) return <LoadingState />
@@ -60,6 +75,10 @@ export default function Projects() {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {projects.map((p) => {
             const video = videos[p.id]
+            const progress = Math.max(0, Math.min(100, Number(p.progress ?? 0)))
+            const isFinished = p.status === 'COMPLETED'
+            const isFailed = p.status === 'FAILED'
+
             return (
               <Link key={p.id} to={`/projects/${p.id}`} className="card group overflow-hidden">
                 <div className="relative aspect-video bg-surface-850">
@@ -85,17 +104,17 @@ export default function Projects() {
                     <h3 className="truncate font-semibold group-hover:text-brand-400">{p.name}</h3>
                     <StatusBadge status={p.status} />
                   </div>
-                  {!['COMPLETED', 'FAILED'].includes(p.status) && (
+                  {!isFinished && !isFailed && (
                     <div className="mb-2">
-                      <div className="flex items-center justify-between text-[11px] mb-1">
-                        <span className="text-brand-400 font-medium capitalize">
-                          {p.status.toLowerCase().replaceAll('_', ' ')}...
+                      <div className="mb-1 flex items-center justify-between text-[11px]">
+                        <span className="font-medium capitalize text-brand-400">
+                          {p.status.toLowerCase().replaceAll('_', ' ')}
                         </span>
-                        <span className="text-zinc-400 font-bold tabular-nums">
-                          {Math.round(p.progress || 15)}%
+                        <span className="font-bold tabular-nums text-zinc-400">
+                          {Math.round(progress)}%
                         </span>
                       </div>
-                      <ProgressBar value={p.progress || 15} />
+                      <ProgressBar value={progress} />
                     </div>
                   )}
                   <p className="text-xs text-zinc-500">
