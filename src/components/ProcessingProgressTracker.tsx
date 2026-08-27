@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import {
   Download,
   Mic,
@@ -9,6 +11,7 @@ import {
   AlertCircle,
   RotateCw,
 } from 'lucide-react'
+import { supabase } from '@/lib/supabase'
 import type { ProcessingStatus } from '@/lib/types'
 import { classNames } from '@/lib/format'
 
@@ -50,24 +53,75 @@ const STATUS_DETAILS: Partial<Record<ProcessingStatus, string>> = {
 export function ProcessingProgressTracker({
   status,
   progress,
-  renderProgress,
   onRunAiNow,
   isProcessingNow,
   errorMessage,
 }: {
   status: ProcessingStatus
   progress: number
-  renderProgress?: number | null
   onRunAiNow?: () => void
   isProcessingNow?: boolean
   errorMessage?: string | null
 }) {
+  const { projectId } = useParams<{ projectId: string }>()
+  const [renderProgress, setRenderProgress] = useState(0)
+
+  // Render progress is deliberately read from render_jobs. It never falls back
+  // to a guessed percentage, so a queued/not-started render is honestly 0%.
+  useEffect(() => {
+    if (!projectId || !['RENDERING', 'ADDING_CAPTIONS', 'UPLOADING_RENDER'].includes(status)) {
+      setRenderProgress(0)
+      return
+    }
+
+    let cancelled = false
+
+    const loadRenderProgress = async () => {
+      const { data: clips, error: clipsError } = await supabase
+        .from('clips')
+        .select('id')
+        .eq('project_id', projectId)
+
+      if (cancelled || clipsError || !clips?.length) {
+        if (!cancelled) setRenderProgress(0)
+        return
+      }
+
+      const clipIds = clips.map((clip) => clip.id)
+      const { data: jobs, error: jobsError } = await supabase
+        .from('render_jobs')
+        .select('status, progress')
+        .in('clip_id', clipIds)
+
+      if (cancelled || jobsError || !jobs?.length) {
+        if (!cancelled) setRenderProgress(0)
+        return
+      }
+
+      const values = jobs.map((job) => {
+        if (job.status === 'COMPLETED') return 100
+        if (job.status === 'FAILED') return 0
+        return Math.max(0, Math.min(100, Number(job.progress ?? 0)))
+      })
+
+      const average = values.reduce((sum, value) => sum + value, 0) / values.length
+      if (!cancelled) setRenderProgress(Math.round(average))
+    }
+
+    void loadRenderProgress()
+    const interval = setInterval(() => void loadRenderProgress(), 1500)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [projectId, status])
+
   const isFailed = status === 'FAILED'
   const isComplete = status === 'COMPLETED'
   const pipelineProgress = Math.max(0, Math.min(100, Number.isFinite(Number(progress)) ? Number(progress) : 0))
-  const backendRenderProgress = Math.max(0, Math.min(100, Number.isFinite(Number(renderProgress)) ? Number(renderProgress) : 0))
   const isRenderStage = ['RENDERING', 'ADDING_CAPTIONS', 'UPLOADING_RENDER'].includes(status)
-  const displayProgress = isComplete ? 100 : isRenderStage ? backendRenderProgress : pipelineProgress
+  const displayProgress = isComplete ? 100 : isRenderStage ? renderProgress : pipelineProgress
 
   let activeStepIndex = 0
   if (isComplete) {
@@ -120,7 +174,7 @@ export function ProcessingProgressTracker({
           const Icon = step.icon
           const isDone = isComplete || idx < activeStepIndex
           const isCurrent = !isComplete && !isFailed && idx === activeStepIndex
-          const stepProgress = isCurrent && isRenderStage ? backendRenderProgress : isDone ? 100 : 0
+          const stepProgress = isCurrent && isRenderStage ? renderProgress : isDone ? 100 : 0
 
           return (
             <div key={step.id} className={classNames('relative flex min-h-[150px] flex-col justify-between p-4', isCurrent ? 'bg-brand-500/5' : '')}>
