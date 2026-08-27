@@ -1,7 +1,8 @@
-// Validates a render job and optionally notifies the render worker webhook.
-// The Node render worker polls for QUEUED jobs, so this function is a
-// fast-path trigger rather than the renderer itself (Remotion cannot run
-// inside an edge function).
+// Validates a render job and optionally notifies the FFmpeg render worker.
+// The Node worker polls for QUEUED jobs, so this function is a fast-path
+// trigger rather than the renderer itself. FFmpeg performs the actual
+// download, editing, B-roll compositing, caption/audio processing and MP4
+// export outside the Supabase Edge runtime.
 
 import {
   corsHeaders,
