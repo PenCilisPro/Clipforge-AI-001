@@ -24,36 +24,24 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
-import {
-  bundle,
-} from "@remotion/bundler";
-
+import { bundle } from "@Remotion/bundler";
 import {
   renderMedia,
   renderStill,
   selectComposition,
-} from "@remotion/renderer";
+} from "@Remotion/renderer";
+import { createClient } from "@supabase/supabase-js";
 
-import {
-  createClient,
-} from "@supabase/supabase-js";
+import type { ClipConfiguration } from "./src/types";
 
-import type {
-  ClipConfiguration,
-} from "./src/types";
-
-const execFileAsync =
-  promisify(execFile);
+const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // ENVIRONMENT
 // ============================================================================
 
-function requireEnv(
-  name: string,
-): string {
-  const value =
-    process.env[name];
+function requireEnv(name: string): string {
+  const value = process.env[name];
 
   if (!value) {
     throw new Error(
@@ -64,40 +52,34 @@ function requireEnv(
   return value;
 }
 
-const SUPABASE_URL =
-  requireEnv(
-    "SUPABASE_URL",
-  );
-
-const SERVICE_ROLE_KEY =
-  requireEnv(
-    "SUPABASE_SERVICE_ROLE_KEY",
-  );
+const SUPABASE_URL = requireEnv("SUPABASE_URL");
+const SERVICE_ROLE_KEY = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
 
 // ============================================================================
 // SUPABASE
 // ============================================================================
 
-const supabase =
-  createClient(
-    SUPABASE_URL,
-    SERVICE_ROLE_KEY,
-    {
-      auth: {
-        persistSession: false,
-      },
+const supabase = createClient(
+  SUPABASE_URL,
+  SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
     },
-  );
+  },
+);
 
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
-const POLL_INTERVAL_MS =
-  5000;
+const POLL_INTERVAL_MS = 5000;
+const SOURCE_SIGNED_URL_TTL = 60 * 60 * 6;
 
-const SOURCE_SIGNED_URL_TTL =
-  60 * 60 * 6;
+// IMPORTANT:
+// Railway currently has only 1 GB RAM.
+// Never allow Remotion to spawn multiple render threads.
+const REMOTION_CONCURRENCY = 1;
 
 // ============================================================================
 // TYPES
@@ -117,8 +99,7 @@ interface ClipVersionRow {
   id: string;
   clip_id: string;
   version_number: number;
-  configuration_json:
-    ClipConfiguration;
+  configuration_json: ClipConfiguration;
 }
 
 interface ClipRow {
@@ -131,25 +112,18 @@ interface ClipRow {
 // REMOTION BUNDLE
 // ============================================================================
 
-let bundleLocation:
-  string | null = null;
+let bundleLocation: string | null = null;
 
 async function getBundle(): Promise<string> {
   if (bundleLocation) {
     return bundleLocation;
   }
 
-  console.log(
-    "Bundling Remotion composition...",
-  );
+  console.log("Bundling Remotion composition...");
 
-  bundleLocation =
-    await bundle({
-      entryPoint:
-        path.resolve(
-          "src/index.ts",
-        ),
-    });
+  bundleLocation = await bundle({
+    entryPoint: path.resolve("src/index.ts"),
+  });
 
   return bundleLocation;
 }
@@ -169,14 +143,10 @@ async function updateJob(
     completed_at?: string;
   },
 ): Promise<void> {
-  const { error } =
-    await supabase
-      .from("render_jobs")
-      .update(fields)
-      .eq(
-        "id",
-        jobId,
-      );
+  const { error } = await supabase
+    .from("render_jobs")
+    .update(fields)
+    .eq("id", jobId);
 
   if (error) {
     console.error(
@@ -193,8 +163,7 @@ async function updateJob(
 async function resolveSourceUrl(
   config: ClipConfiguration,
 ): Promise<string> {
-  const source =
-    config.sourceVideo;
+  const source = config.sourceVideo;
 
   if (
     typeof source !== "string" ||
@@ -206,20 +175,13 @@ async function resolveSourceUrl(
   }
 
   if (
-    source.startsWith(
-      "http://",
-    ) ||
-    source.startsWith(
-      "https://",
-    )
+    source.startsWith("http://") ||
+    source.startsWith("https://")
   ) {
     return source;
   }
 
-  const {
-    data,
-    error,
-  } =
+  const { data, error } =
     await supabase.storage
       .from("sources")
       .createSignedUrl(
@@ -227,14 +189,10 @@ async function resolveSourceUrl(
         SOURCE_SIGNED_URL_TTL,
       );
 
-  if (
-    error ||
-    !data
-  ) {
+  if (error || !data) {
     throw new Error(
       `Cannot sign source video URL for "${source}": ${
-        error?.message ||
-        "unknown error"
+        error?.message || "unknown error"
       }`,
     );
   }
@@ -253,17 +211,13 @@ async function processJob(
     `\nProcessing render job ${job.id}...`,
   );
 
-  await updateJob(
-    job.id,
-    {
-      status: "RENDERING",
-      stage: "PREPARING",
-      progress: 0,
-      started_at:
-        new Date().toISOString(),
-      error_message: null,
-    },
-  );
+  await updateJob(job.id, {
+    status: "RENDERING",
+    stage: "PREPARING",
+    progress: 0,
+    started_at: new Date().toISOString(),
+    error_message: null,
+  });
 
   await supabase
     .from("clip_versions")
@@ -275,13 +229,12 @@ async function processJob(
       job.clip_version_id,
     );
 
-  const workDir =
-    mkdtempSync(
-      path.join(
-        tmpdir(),
-        "clipforge-render-",
-      ),
-    );
+  const workDir = mkdtempSync(
+    path.join(
+      tmpdir(),
+      "clipforge-render-",
+    ),
+  );
 
   try {
     // ------------------------------------------------------------------------
@@ -291,17 +244,16 @@ async function processJob(
     const {
       data: versionData,
       error: versionError,
-    } =
-      await supabase
-        .from("clip_versions")
-        .select(
-          "id, clip_id, version_number, configuration_json",
-        )
-        .eq(
-          "id",
-          job.clip_version_id,
-        )
-        .single();
+    } = await supabase
+      .from("clip_versions")
+      .select(
+        "id, clip_id, version_number, configuration_json",
+      )
+      .eq(
+        "id",
+        job.clip_version_id,
+      )
+      .single();
 
     if (
       versionError ||
@@ -325,17 +277,16 @@ async function processJob(
     const {
       data: clipData,
       error: clipError,
-    } =
-      await supabase
-        .from("clips")
-        .select(
-          "id, project_id, title",
-        )
-        .eq(
-          "id",
-          job.clip_id,
-        )
-        .single();
+    } = await supabase
+      .from("clips")
+      .select(
+        "id, project_id, title",
+      )
+      .eq(
+        "id",
+        job.clip_id,
+      )
+      .single();
 
     if (
       clipError ||
@@ -356,15 +307,12 @@ async function processJob(
     // CONFIGURATION
     // ------------------------------------------------------------------------
 
-    const config:
-      ClipConfiguration = {
+    const config: ClipConfiguration = {
       ...version.configuration_json,
     };
 
     config.sourceVideo =
-      await resolveSourceUrl(
-        config,
-      );
+      await resolveSourceUrl(config);
 
     console.log(
       `Source URL resolved for clip ${clip.id}.`,
@@ -374,13 +322,10 @@ async function processJob(
     // BUNDLE REMOTION
     // ------------------------------------------------------------------------
 
-    await updateJob(
-      job.id,
-      {
-        stage: "BUNDLING",
-        progress: 2,
-      },
-    );
+    await updateJob(job.id, {
+      stage: "BUNDLING",
+      progress: 2,
+    });
 
     const serveUrl =
       await getBundle();
@@ -389,13 +334,10 @@ async function processJob(
     // SELECT COMPOSITION
     // ------------------------------------------------------------------------
 
-    await updateJob(
-      job.id,
-      {
-        stage: "PREPARING",
-        progress: 5,
-      },
-    );
+    await updateJob(job.id, {
+      stage: "PREPARING",
+      progress: 5,
+    });
 
     const composition =
       await selectComposition({
@@ -416,25 +358,25 @@ async function processJob(
         "clip.mp4",
       );
 
-    let lastReported =
-      -1;
+    let lastReported = -1;
 
-    await updateJob(
-      job.id,
-      {
-        stage: "RENDERING",
-        progress: 5,
-      },
+    await updateJob(job.id, {
+      stage: "RENDERING",
+      progress: 5,
+    });
+
+    console.log(
+      `Starting Remotion render with concurrency=${REMOTION_CONCURRENCY}`,
     );
 
     await renderMedia({
       composition,
       serveUrl,
-
       codec: "h264",
+      outputLocation: outputPath,
 
-      outputLocation:
-        outputPath,
+      // CRITICAL FOR 1 GB RAILWAY MEMORY
+      concurrency: REMOTION_CONCURRENCY,
 
       inputProps: {
         config,
@@ -461,10 +403,9 @@ async function processJob(
 
         if (
           pct >=
-            lastReported + 2
+          lastReported + 2
         ) {
-          lastReported =
-            pct;
+          lastReported = pct;
 
           void updateJob(
             job.id,
@@ -473,45 +414,40 @@ async function processJob(
                 "RENDERING",
               stage:
                 "RENDERING",
-              progress:
-                pct,
+              progress: pct,
             },
           );
         }
       },
     });
 
+    console.log(
+      `Remotion render finished for job ${job.id}.`,
+    );
+
     // ------------------------------------------------------------------------
     // VALIDATE OUTPUT
     // ------------------------------------------------------------------------
 
-    await updateJob(
-      job.id,
-      {
-        stage: "VALIDATING",
-        progress: 92,
-      },
-    );
+    await updateJob(job.id, {
+      stage: "VALIDATING",
+      progress: 92,
+    });
 
     const {
-      stdout:
-        ffprobeStdout,
-    } =
-      await execFileAsync(
-        "ffprobe",
-        [
-          "-v",
-          "error",
-
-          "-show_entries",
-          "stream=codec_type,codec_name,duration",
-
-          "-of",
-          "json",
-
-          outputPath,
-        ],
-      );
+      stdout: ffprobeStdout,
+    } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,duration",
+        "-of",
+        "json",
+        outputPath,
+      ],
+    );
 
     const ffprobeResult =
       JSON.parse(
@@ -519,8 +455,7 @@ async function processJob(
       );
 
     const streams =
-      ffprobeResult.streams ||
-      [];
+      ffprobeResult.streams || [];
 
     const videoStream =
       streams.find(
@@ -548,34 +483,27 @@ async function processJob(
     // UPLOAD VIDEO
     // ------------------------------------------------------------------------
 
-    await updateJob(
-      job.id,
-      {
-        stage:
-          "UPLOADING_RENDER",
-        progress: 95,
-      },
-    );
+    await updateJob(job.id, {
+      stage: "UPLOADING_RENDER",
+      progress: 95,
+    });
 
     const renderKey =
       `projects/${clip.project_id}/renders/${clip.id}-v${version.version_number}.mp4`;
 
     const {
       error: uploadError,
-    } =
-      await supabase.storage
-        .from("renders")
-        .upload(
-          renderKey,
-          readFileSync(
-            outputPath,
-          ),
-          {
-            contentType:
-              "video/mp4",
-            upsert: true,
-          },
-        );
+    } = await supabase.storage
+      .from("renders")
+      .upload(
+        renderKey,
+        readFileSync(outputPath),
+        {
+          contentType:
+            "video/mp4",
+          upsert: true,
+        },
+      );
 
     if (uploadError) {
       throw new Error(
@@ -605,14 +533,11 @@ async function processJob(
       string | null = null;
 
     try {
-      await updateJob(
-        job.id,
-        {
-          stage:
-            "GENERATING_THUMBNAIL",
-          progress: 97,
-        },
-      );
+      await updateJob(job.id, {
+        stage:
+          "GENERATING_THUMBNAIL",
+        progress: 97,
+      });
 
       const thumbnailPath =
         path.join(
@@ -623,18 +548,16 @@ async function processJob(
       await renderStill({
         composition,
         serveUrl,
-
         output:
           thumbnailPath,
 
+        // Keep thumbnail generation lightweight.
         inputProps: {
           config,
         },
 
         frame: 0,
-
-        imageFormat:
-          "jpeg",
+        imageFormat: "jpeg",
       });
 
       const thumbnailKey =
@@ -643,20 +566,19 @@ async function processJob(
       const {
         error:
           thumbnailUploadError,
-      } =
-        await supabase.storage
-          .from("renders")
-          .upload(
-            thumbnailKey,
-            readFileSync(
-              thumbnailPath,
-            ),
-            {
-              contentType:
-                "image/jpeg",
-              upsert: true,
-            },
-          );
+      } = await supabase.storage
+        .from("renders")
+        .upload(
+          thumbnailKey,
+          readFileSync(
+            thumbnailPath,
+          ),
+          {
+            contentType:
+              "image/jpeg",
+            upsert: true,
+          },
+        );
 
       if (
         thumbnailUploadError
@@ -673,7 +595,9 @@ async function processJob(
             )
             .data.publicUrl;
       }
-    } catch (thumbnailError) {
+    } catch (
+      thumbnailError
+    ) {
       console.warn(
         "Thumbnail generation failed:",
         thumbnailError instanceof Error
@@ -691,23 +615,20 @@ async function processJob(
     const {
       error:
         versionUpdateError,
-    } =
-      await supabase
-        .from("clip_versions")
-        .update({
-          render_url:
-            renderUrl,
-
-          thumbnail_url:
-            thumbnailUrl,
-
-          status:
-            "RENDERED",
-        })
-        .eq(
-          "id",
-          version.id,
-        );
+    } = await supabase
+      .from("clip_versions")
+      .update({
+        render_url:
+          renderUrl,
+        thumbnail_url:
+          thumbnailUrl,
+        status:
+          "RENDERED",
+      })
+      .eq(
+        "id",
+        version.id,
+      );
 
     if (
       versionUpdateError
@@ -724,26 +645,22 @@ async function processJob(
     const {
       error:
         clipUpdateError,
-    } =
-      await supabase
-        .from("clips")
-        .update({
-          current_version_id:
-            version.id,
-
-          current_render_url:
-            renderUrl,
-
-          current_thumbnail_url:
-            thumbnailUrl,
-
-          status:
-            "RENDERED",
-        })
-        .eq(
-          "id",
-          clip.id,
-        );
+    } = await supabase
+      .from("clips")
+      .update({
+        current_version_id:
+          version.id,
+        current_render_url:
+          renderUrl,
+        current_thumbnail_url:
+          thumbnailUrl,
+        status:
+          "RENDERED",
+      })
+      .eq(
+        "id",
+        clip.id,
+      );
 
     if (
       clipUpdateError
@@ -757,22 +674,13 @@ async function processJob(
     // COMPLETE RENDER JOB
     // ------------------------------------------------------------------------
 
-    await updateJob(
-      job.id,
-      {
-        status:
-          "COMPLETED",
-
-        stage:
-          "COMPLETED",
-
-        progress:
-          100,
-
-        completed_at:
-          new Date().toISOString(),
-      },
-    );
+    await updateJob(job.id, {
+      status: "COMPLETED",
+      stage: "COMPLETED",
+      progress: 100,
+      completed_at:
+        new Date().toISOString(),
+    });
 
     console.log(
       `Render job ${job.id} completed.`,
@@ -793,6 +701,7 @@ async function processJob(
     //
     // pipeline.ts aggregates the render jobs and owns
     // the project-level progress.
+
   } catch (err) {
     const message =
       err instanceof Error
@@ -804,31 +713,20 @@ async function processJob(
       message,
     );
 
-    await updateJob(
-      job.id,
-      {
-        status:
-          "FAILED",
-
-        stage:
-          "FAILED",
-
-        progress:
-          0,
-
-        error_message:
-          message,
-
-        completed_at:
-          new Date().toISOString(),
-      },
-    );
+    await updateJob(job.id, {
+      status: "FAILED",
+      stage: "FAILED",
+      progress: 0,
+      error_message:
+        message,
+      completed_at:
+        new Date().toISOString(),
+    });
 
     await supabase
       .from("clip_versions")
       .update({
-        status:
-          "FAILED",
+        status: "FAILED",
       })
       .eq(
         "id",
@@ -838,8 +736,7 @@ async function processJob(
     await supabase
       .from("clips")
       .update({
-        status:
-          "FAILED",
+        status: "FAILED",
       })
       .eq(
         "id",
@@ -848,6 +745,7 @@ async function processJob(
 
     // Do NOT update projects.progress here.
     // pipeline.ts will detect the FAILED render job.
+
   } finally {
     rmSync(
       workDir,
@@ -868,32 +766,31 @@ async function claimNextJob():
   const {
     data,
     error,
-  } =
-    await supabase
-      .from("render_jobs")
-      .select(
-        `
-          id,
-          clip_id,
-          clip_version_id,
-          status,
-          progress,
-          stage,
-          error_message
-        `,
-      )
-      .eq(
-        "status",
-        "QUEUED",
-      )
-      .order(
-        "created_at",
-        {
-          ascending: true,
-        },
-      )
-      .limit(1)
-      .maybeSingle();
+  } = await supabase
+    .from("render_jobs")
+    .select(
+      `
+        id,
+        clip_id,
+        clip_version_id,
+        status,
+        progress,
+        stage,
+        error_message
+      `,
+    )
+    .eq(
+      "status",
+      "QUEUED",
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      },
+    )
+    .limit(1)
+    .maybeSingle();
 
   if (error) {
     console.error(
@@ -908,10 +805,9 @@ async function claimNextJob():
     return null;
   }
 
-  // Atomic claim.
-  //
-  // If another worker claims the same job first,
-  // this update returns no row and this worker moves on.
+  // --------------------------------------------------------------------------
+  // ATOMIC CLAIM
+  // --------------------------------------------------------------------------
 
   const {
     data: claimed,
@@ -920,14 +816,9 @@ async function claimNextJob():
     await supabase
       .from("render_jobs")
       .update({
-        status:
-          "CLAIMED",
-
-        stage:
-          "CLAIMED",
-
-        progress:
-          0,
+        status: "CLAIMED",
+        stage: "CLAIMED",
+        progress: 0,
       })
       .eq(
         "id",
@@ -970,6 +861,10 @@ async function main(): Promise<void> {
   );
 
   console.log(
+    `Remotion concurrency: ${REMOTION_CONCURRENCY}`,
+  );
+
+  console.log(
     "Polling for QUEUED render jobs...",
   );
 
@@ -979,12 +874,12 @@ async function main(): Promise<void> {
         await claimNextJob();
 
       if (job) {
-        await processJob(
-          job,
-        );
-
+        // IMPORTANT:
+        // Process exactly ONE render at a time.
+        await processJob(job);
         continue;
       }
+
     } catch (error) {
       console.error(
         "Render worker loop error:",
