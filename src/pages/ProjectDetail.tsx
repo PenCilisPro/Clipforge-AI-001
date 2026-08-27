@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Film, RefreshCw, Sparkles, Loader2 } from 'lucide-react'
-import { supabase } from '@/lib/supabase'
-import { processProjectInBrowser } from '@/lib/clientProcessor'
+import { supabase, invokeFunction } from '@/lib/supabase'
 import type { Project, Video, Transcript, Clip } from '@/lib/types'
 import { normalizeClipConfiguration } from '@/lib/types'
 import { formatDuration, formatTimestamp } from '@/lib/format'
@@ -59,7 +58,10 @@ export default function ProjectDetail() {
     if (!projectId) return
     setRetrying(true)
     try {
-      await processProjectInBrowser(projectId)
+      // Re-queue on the real backend pipeline worker rather than faking progress
+      // in the browser. The worker claims QUEUED projects and writes real
+      // status/progress back to this row as it actually processes the video.
+      await invokeFunction('process-video', { projectId })
       await loadAll()
     } catch (e: any) {
       console.error(e)
