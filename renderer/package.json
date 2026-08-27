@@ -5,11 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "remotion studio src/index.ts",
-    "worker": "tsx worker.ts",
+    "worker": "tsx --import ./projectQueueAgent.ts worker.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remotion/bundler": "^4.0.518",
     "@remotion/renderer": "^4.0.518",
     "@supabase/supabase-js": "^2.109.0",
     "dotenv": "^17.2.2",
