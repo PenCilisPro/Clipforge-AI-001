@@ -1777,6 +1777,14 @@ async function sliceClipVideo(
       "fast",
       "-crf",
       "23",
+      // Without this, libx264 auto-detects the HOST machine's CPU count
+      // (60 threads in Railway's case) rather than what the container is
+      // actually allocated, then gets silently killed by the container's
+      // resource limits partway through encoding — no ffmpeg-side error,
+      // just a dead process at frame=0. Capping threads explicitly avoids
+      // that mismatch.
+      "-threads",
+      "2",
 
       "-c:a",
       "aac",
