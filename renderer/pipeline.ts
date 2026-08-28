@@ -4,12 +4,14 @@
 // 1. Claim QUEUED project
 // 2. Download the full source video (YouTube or uploaded file)
 // 3. Probe source, extract full audio, transcribe the WHOLE video with
-//    Gemini, and save that transcript (used for the "View Transcript" UI)
+//    Google Cloud Speech-to-Text, and save that transcript (used for the
+//    "View Transcript" UI)
 // 4. Send the transcript to Claude (via OpenRouter) so it picks the best
 //    moments based on actual content, not just the title
 // 5. Create clip records for each candidate moment
-// 6. Slice each clip with ffmpeg, transcribe the clipped audio with Gemini
-//    for burned-in captions, and find B-roll + music
+// 6. Slice each clip with ffmpeg, transcribe the clipped audio with
+//    Google Cloud Speech-to-Text for burned-in captions, and find B-roll +
+//    music
 // 7. Create clip_versions as QUEUED
 // 8. Create render_jobs as QUEUED
 // 9. Wait for Remotion worker
@@ -62,9 +64,11 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-// Gemini handles transcription (full-video + per-clip captions) instead of
-// OpenAI Whisper — no OpenAI key required.
-const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
+// Google Cloud Speech-to-Text handles transcription (full-video + per-clip
+// captions) instead of OpenAI Whisper — no OpenAI key required. This is a
+// plain Google API key (AIzaSy...) with the Speech-to-Text API enabled on
+// its GCP project, not a Google AI Studio/Gemini key.
+const GOOGLE_CLOUD_API_KEY = requireEnv("GOOGLE_CLOUD_API_KEY");
 // Claude is called through OpenRouter rather than api.anthropic.com
 // directly, using an OpenRouter key.
 const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
@@ -95,10 +99,6 @@ const YTDLP_PATH =
 const ANTHROPIC_MODEL =
   process.env.ANTHROPIC_MODEL || "anthropic/claude-sonnet-5";
 
-// Gemini model used for audio transcription.
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-2.0-flash";
-
 // ============================================================================
 // API HEADERS
 // ============================================================================
@@ -118,8 +118,6 @@ const rapidApiHeaders: Record<string, string> = {
 const pexelsHeaders: Record<string, string> = {
   Authorization: PEXELS_API_KEY,
 };
-
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // ============================================================================
 // SUPABASE
@@ -1018,19 +1016,17 @@ async function extractFullAudio(
 }
 
 // ============================================================================
-// GEMINI TRANSCRIPTION (replaces OpenAI Whisper)
+// GOOGLE CLOUD SPEECH-TO-TEXT (replaces Gemini / OpenAI Whisper)
 // ============================================================================
 //
-// Gemini takes audio directly as inline base64 data and is asked to return
-// a JSON transcript with segment-level timestamps. Unlike Whisper, Gemini
-// isn't a dedicated forced-aligner, so word-level timing (needed for
-// karaoke-style burned-in captions) is approximated by evenly distributing
-// each segment's words across that segment's [start, end] window,
-// proportional to word length. That's good enough for readable captions
-// but won't be frame-perfect the way Whisper's native word timestamps are.
+// Unlike Gemini, Speech-to-Text is a dedicated ASR service and gives real
+// per-word timestamps (enableWordTimeOffsets), so captions no longer need
+// the character-length approximation the Gemini path required.
 //
-// Gemini's inline data limit is ~20MB per request; base64 adds ~33%
-// overhead, so we cap raw audio uploads well under that.
+// Uses speech:longrunningrecognize (works for any audio length) with audio
+// sent inline as base64. Inline requests are capped around 10MB by the
+// API, so very long source videos may still exceed that — same tradeoff
+// as before, just a different ceiling.
 
 interface FullTranscriptSegment {
   start: number;
@@ -1038,120 +1034,146 @@ interface FullTranscriptSegment {
   text: string;
 }
 
-const GEMINI_MAX_AUDIO_BYTES = 15 * 1024 * 1024;
-
-const TRANSCRIPTION_PROMPT = `Transcribe this audio completely and accurately.
-
-Return ONLY valid JSON in this exact shape, with no markdown fences and no
-commentary:
-
-{
-  "segments": [
-    { "start": 0.0, "end": 4.2, "text": "..." }
-  ]
+interface SpeechWord {
+  text: string;
+  start: number;
+  end: number;
 }
 
-Rules:
-- "start" and "end" are seconds from the beginning of the audio, as numbers.
-- Break the transcript into short segments (roughly one sentence or
-  natural phrase each), in chronological order, covering the entire audio.
-- Timestamps must be as accurate as you can make them.
-- Do not skip or summarize any spoken content.
-- If a stretch of audio has no speech, omit it rather than inventing text.`;
+const SPEECH_MAX_AUDIO_BYTES = 9 * 1024 * 1024;
 
-async function callGeminiTranscription(
+function parseGoogleDuration(value: string | undefined): number {
+  if (!value) return 0;
+  // Google returns durations like "1.200s"
+  return Number(String(value).replace("s", "")) || 0;
+}
+
+async function callSpeechToText(
   audioPath: string,
-): Promise<FullTranscriptSegment[] | null> {
+): Promise<SpeechWord[] | null> {
   try {
     const stats = statSync(audioPath);
 
-    if (stats.size > GEMINI_MAX_AUDIO_BYTES) {
+    if (stats.size > SPEECH_MAX_AUDIO_BYTES) {
       console.warn(
         `Audio is ${Math.round(
           stats.size / 1024 / 1024,
-        )}MB, over the Gemini inline upload limit — skipping transcription.`,
+        )}MB, over the Speech-to-Text inline upload limit — skipping transcription.`,
       );
 
       return null;
     }
 
-    const base64Audio = readFileSync(audioPath).toString(
-      "base64",
+    const base64Audio = readFileSync(audioPath).toString("base64");
+
+    const startResponse = await fetch(
+      `https://speech.googleapis.com/v1/speech:longrunningrecognize?key=${GOOGLE_CLOUD_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            encoding: "MP3",
+            sampleRateHertz: 16000,
+            languageCode: "en-US",
+            enableWordTimeOffsets: true,
+            enableAutomaticPunctuation: true,
+            model: "latest_long",
+          },
+          audio: { content: base64Audio },
+        }),
+      },
     );
 
-    const response = await fetch(GEMINI_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                inline_data: {
-                  mime_type: "audio/mp3",
-                  data: base64Audio,
-                },
-              },
-              { text: TRANSCRIPTION_PROMPT },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
+    if (!startResponse.ok) {
+      const errorText = await startResponse.text();
 
       console.warn(
-        `Gemini transcription returned ${response.status}: ${errorText}`,
+        `Speech-to-Text returned ${startResponse.status}: ${errorText}`,
       );
 
       return null;
     }
 
-    const data = (await response.json()) as any;
+    const startData = (await startResponse.json()) as any;
+    const operationName = startData.name;
 
-    const rawText =
-      data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    if (!operationName) {
+      console.warn(
+        "Speech-to-Text did not return an operation name.",
+      );
 
-    if (!rawText) {
-      console.warn("Gemini returned empty transcription content.");
       return null;
     }
 
-    const cleanedText = rawText
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
+    // Poll the long-running operation until done (or we give up).
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_POLLS = 100; // ~5 minutes
 
-    const parsed = JSON.parse(cleanedText);
+    let operationData: any = null;
 
-    if (!Array.isArray(parsed.segments)) {
-      console.warn("Gemini transcription JSON had no segments array.");
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, POLL_INTERVAL_MS),
+      );
+
+      const pollResponse = await fetch(
+        `https://speech.googleapis.com/v1/operations/${operationName}?key=${GOOGLE_CLOUD_API_KEY}`,
+      );
+
+      if (!pollResponse.ok) continue;
+
+      const polled = (await pollResponse.json()) as any;
+
+      if (polled.done) {
+        operationData = polled;
+        break;
+      }
+    }
+
+    if (!operationData) {
+      console.warn(
+        "Speech-to-Text operation did not complete in time.",
+      );
+
       return null;
     }
 
-    const segments: FullTranscriptSegment[] = parsed.segments
-      .filter(
-        (segment: any) =>
-          Number.isFinite(Number(segment.start)) &&
-          Number.isFinite(Number(segment.end)) &&
-          Number(segment.end) > Number(segment.start),
-      )
-      .map((segment: any) => ({
-        start: Number(Number(segment.start).toFixed(2)),
-        end: Number(Number(segment.end).toFixed(2)),
-        text: String(segment.text || "").trim(),
-      }));
+    if (operationData.error) {
+      console.warn(
+        `Speech-to-Text operation failed: ${JSON.stringify(
+          operationData.error,
+        )}`,
+      );
 
-    return segments;
+      return null;
+    }
+
+    const results = operationData.response?.results || [];
+
+    const words: SpeechWord[] = [];
+
+    for (const result of results) {
+      const alt = result.alternatives?.[0];
+      if (!alt?.words) continue;
+
+      for (const w of alt.words) {
+        words.push({
+          text: String(w.word || "").trim(),
+          start: Number(
+            parseGoogleDuration(w.startTime).toFixed(2),
+          ),
+          end: Number(
+            parseGoogleDuration(w.endTime).toFixed(2),
+          ),
+        });
+      }
+    }
+
+    return words;
   } catch (error) {
     console.warn(
-      "Gemini transcription failed:",
+      "Speech-to-Text transcription failed:",
       error instanceof Error ? error.message : String(error),
     );
 
@@ -1159,53 +1181,45 @@ async function callGeminiTranscription(
   }
 }
 
-// Splits each segment's text into words and spreads them across the
-// segment's [start, end] window proportional to word length. This is an
-// approximation used only because Gemini doesn't give real word-level
-// timestamps the way Whisper does.
-function estimateWordTimestamps(
-  segments: FullTranscriptSegment[],
-): CaptionWordConfig[] {
-  const words: CaptionWordConfig[] = [];
+// Groups a flat word list into sentence-like segments (splits after
+// sentence-ending punctuation, or after a long pause between words) for
+// the "View Transcript" UI and for Claude's moment-selection prompt.
+function wordsToSegments(
+  words: SpeechWord[],
+): FullTranscriptSegment[] {
+  const segments: FullTranscriptSegment[] = [];
 
-  for (const segment of segments) {
-    const segmentWords = segment.text
-      .split(/\s+/)
-      .filter((word) => word.length > 0);
+  let current: SpeechWord[] = [];
 
-    if (segmentWords.length === 0) continue;
+  const flush = () => {
+    if (current.length === 0) return;
 
-    const totalChars = segmentWords.reduce(
-      (sum, word) => sum + word.length,
-      0,
-    );
+    segments.push({
+      start: current[0].start,
+      end: current[current.length - 1].end,
+      text: current.map((w) => w.text).join(" "),
+    });
 
-    const segmentDuration = Math.max(
-      0.01,
-      segment.end - segment.start,
-    );
+    current = [];
+  };
 
-    let cursor = segment.start;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    current.push(word);
 
-    for (const word of segmentWords) {
-      const share =
-        totalChars > 0 ? word.length / totalChars : 1 / segmentWords.length;
+    const endsSentence = /[.!?]$/.test(word.text);
+    const nextWord = words[i + 1];
+    const longPause =
+      nextWord && nextWord.start - word.end > 1.5;
 
-      const wordDuration = segmentDuration * share;
-
-      words.push({
-        text: word,
-        start: Number(cursor.toFixed(2)),
-        end: Number(
-          Math.min(segment.end, cursor + wordDuration).toFixed(2),
-        ),
-      });
-
-      cursor += wordDuration;
+    if (endsSentence || longPause) {
+      flush();
     }
   }
 
-  return words;
+  flush();
+
+  return segments;
 }
 
 // ----------------------------------------------------------------------
@@ -1223,13 +1237,15 @@ async function transcribeFullVideo(
   segments: FullTranscriptSegment[];
   fullText: string;
 } | null> {
-  const segments = await callGeminiTranscription(fullAudioPath);
+  const words = await callSpeechToText(fullAudioPath);
 
-  if (!segments || segments.length === 0) return null;
+  if (!words || words.length === 0) return null;
+
+  const segments = wordsToSegments(words);
 
   return {
     segments,
-    fullText: segments.map((segment) => segment.text).join(" "),
+    fullText: words.map((w) => w.text).join(" "),
   };
 }
 
@@ -1783,7 +1799,7 @@ async function extractClipAudio(
 }
 
 // ============================================================================
-// PER-CLIP CAPTIONS (Gemini)
+// PER-CLIP CAPTIONS (Google Cloud Speech-to-Text)
 // ============================================================================
 
 async function transcribeClippedAudio(
@@ -1792,15 +1808,19 @@ async function transcribeClippedAudio(
   words: CaptionWordConfig[];
   text: string;
 }> {
-  const segments = await callGeminiTranscription(clipAudioPath);
+  const words = await callSpeechToText(clipAudioPath);
 
-  if (!segments || segments.length === 0) {
+  if (!words || words.length === 0) {
     return { words: [], text: "" };
   }
 
   return {
-    words: estimateWordTimestamps(segments),
-    text: segments.map((segment) => segment.text).join(" "),
+    words: words.map((w) => ({
+      text: w.text,
+      start: w.start,
+      end: w.end,
+    })),
+    text: words.map((w) => w.text).join(" "),
   };
 }
 
@@ -2245,7 +2265,7 @@ async function processProject(
     // ----------------------------------------------------------------------
 
     // "GENERATING_CONFIG" matches the frontend's "Clip Generation" step
-    // (ffmpeg slicing + per-clip Gemini captions + B-roll + music all
+    // (ffmpeg slicing + per-clip Speech-to-Text captions + B-roll + music all
     // happen inside this per-clip loop below).
     await setStatus(
       project.id,
@@ -2360,7 +2380,7 @@ async function processProject(
       );
 
       // --------------------------------------------------------------------
-      // C. CAPTIONS (Gemini)
+      // C. CAPTIONS (Speech-to-Text)
       // --------------------------------------------------------------------
 
       const clipAudioPath =
