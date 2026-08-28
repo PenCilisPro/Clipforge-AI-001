@@ -1006,10 +1006,17 @@ async function extractFullAudio(
       "1",
       "-ar",
       "16000",
+      // Low bitrate on purpose: Speech-to-Text's inline request has a hard
+      // 10MB payload ceiling, and base64 inflates raw bytes by ~33%. At
+      // 64k this video (18min) alone produced an 8.5MB file that became
+      // an 11.3MB base64 payload and got rejected by the API — 32k roughly
+      // doubles the video length we can fit before hitting that ceiling,
+      // and is still plenty intelligible for ASR.
       "-b:a",
-      "64k",
+      "32k",
       outAudioPath,
     ],
+    { maxBuffer: 20 * 1024 * 1024 },
   );
 
   return outAudioPath;
@@ -1040,7 +1047,13 @@ interface SpeechWord {
   end: number;
 }
 
-const SPEECH_MAX_AUDIO_BYTES = 9 * 1024 * 1024;
+// Google's inline request payload limit is 10,485,760 bytes (10MB) TOTAL,
+// and base64 inflates raw bytes by ~4/3. This cap is on the RAW audio
+// file, sized so the base64 encoding + JSON wrapper stays safely under
+// that limit (10MB * 3/4 ≈ 7.86MB theoretical max — capped lower for
+// margin). At the 32k mono bitrate extractFullAudio now uses, this is
+// good for roughly 29 minutes of audio.
+const SPEECH_MAX_AUDIO_BYTES = 7 * 1024 * 1024;
 
 function parseGoogleDuration(value: string | undefined): number {
   if (!value) return 0;
@@ -1419,9 +1432,16 @@ Important:
         headers: openRouterHeaders,
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
-          // Sized for up to 30 candidates (matches the max clip count the
-          // frontend allows) plus reasoning text per candidate.
-          max_tokens: 8000,
+          // Scales with how many clips were actually requested instead of
+          // always asking for the 30-clip ceiling — a flat 8000 caused a
+          // 1-clip request to get rejected by OpenRouter for needing more
+          // credits than were available, even though it only needed a
+          // fraction of that. ~220 tokens/candidate plus a fixed baseline
+          // for JSON structure and reasoning.
+          max_tokens: Math.min(
+            8000,
+            Math.max(1200, targetCount * 220 + 600),
+          ),
           messages: [
             {
               role: "user",
@@ -1765,6 +1785,11 @@ async function sliceClipVideo(
 
       outPath,
     ],
+    // Without this, ffmpeg's per-frame stderr progress output blows past
+    // Node's default 1MB buffer almost immediately once real encoding
+    // starts (stderr isn't a TTY here, so \r doesn't collapse each line),
+    // which kills the process with no clean ffmpeg-side error message.
+    { maxBuffer: 50 * 1024 * 1024 },
   );
 
   return outPath;
@@ -1793,6 +1818,7 @@ async function extractClipAudio(
       "64k",
       outAudioPath,
     ],
+    { maxBuffer: 20 * 1024 * 1024 },
   );
 
   return outAudioPath;
