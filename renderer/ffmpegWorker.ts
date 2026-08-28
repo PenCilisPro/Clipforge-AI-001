@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { createClient } from '@supabase/supabase-js'
 import type { ClipConfiguration, BrollConfigItem } from './src/types'
@@ -19,6 +20,23 @@ const require = createRequire(import.meta.url)
 // needs anything newer.
 const bundledFfmpeg = require('@ffmpeg-installer/ffmpeg').path as string | null
 const bundledFfprobe = require('ffprobe-static') as { path?: string }
+
+// Font files downloaded at build time by scripts/install-fonts.mjs, used
+// via drawtext's fontfile= instead of font=. The container has no
+// fontconfig set up at all ("Fontconfig error: Cannot load default config
+// file"), so resolving a font *name* through fontconfig always fails —
+// pointing drawtext at an actual font *file* sidesteps that entirely.
+const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
+const FONT_FILES: Record<string, string> = {
+  'inter': path.join(FONTS_DIR, 'Inter.ttf'),
+  'bebas neue': path.join(FONTS_DIR, 'BebasNeue.ttf'),
+  'montserrat': path.join(FONTS_DIR, 'Montserrat.ttf'),
+}
+function resolveFontFile(family: string | undefined): string {
+  const key = (family || '').trim().toLowerCase()
+  const candidate = FONT_FILES[key] || FONT_FILES['inter']
+  return existsSync(candidate) ? candidate : FONT_FILES['inter']
+}
 
 const run = promisify(execFile)
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing required environment variable: ${name}`); return value }
@@ -72,7 +90,7 @@ async function optional(url:string|undefined|null,work:string,name:string){ if(!
 function makeFilters(config:ClipConfiguration,broll:Array<BrollConfigItem & {file:string}>,music:boolean,voice:boolean,w:number,h:number){
   const filters:string[]=[]; filters.push(`[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setpts=PTS-STARTPTS[base]`); let video='[base]'
   broll.forEach((b,i)=>{const start=Math.max(0,num(b.startAt));const end=start+Math.max(.05,num(b.duration,1));filters.push(`[${i+1}:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setpts=PTS-STARTPTS[b${i}]`);const next=`[v${i}]`;filters.push(`${video}[b${i}]overlay=0:0:eof_action=pass:enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'${next}`);video=next})
-  const style=config.captions?.style; for(const word of config.captions?.enabled?(config.captions.words||[]):[]){const text=(word?.text||'').trim();if(!text)continue;const s=Math.max(0,num(word.start)-num(config.startTime));const e=Math.max(s+.05,num(word.end)-num(config.startTime));const y=style?.position==='top'?'h*0.12':style?.position==='center'?'(h-text_h)/2':'h*0.78';const next=`[c${filters.length}]`;filters.push(`${video}drawtext=text='${shellText(text)}':font='${shellText(style?.font||'Arial')}':fontsize=${Math.max(18,num(style?.fontSize,64))}:fontcolor=${style?.textColor||'white'}:bordercolor=${style?.strokeColor||'black'}:borderw=${Math.max(0,num(style?.strokeWidth,6))}:x=(w-text_w)/2:y=${y}:enable='between(t,${s.toFixed(3)},${e.toFixed(3)})'${next}`);video=next}
+  const style=config.captions?.style; for(const word of config.captions?.enabled?(config.captions.words||[]):[]){const text=(word?.text||'').trim();if(!text)continue;const s=Math.max(0,num(word.start)-num(config.startTime));const e=Math.max(s+.05,num(word.end)-num(config.startTime));const y=style?.position==='top'?'h*0.12':style?.position==='center'?'(h-text_h)/2':'h*0.78';const next=`[c${filters.length}]`;filters.push(`${video}drawtext=text='${shellText(text)}':fontfile='${shellText(resolveFontFile(style?.font))}':fontsize=${Math.max(18,num(style?.fontSize,64))}:fontcolor=${style?.textColor||'white'}:bordercolor=${style?.strokeColor||'black'}:borderw=${Math.max(0,num(style?.strokeWidth,6))}:x=(w-text_w)/2:y=${y}:enable='between(t,${s.toFixed(3)},${e.toFixed(3)})'${next}`);video=next}
   let audio='[0:a]'; if(music||voice){const inputs=['[0:a]'];if(music)inputs.push(`[${broll.length+1}:a]`);if(voice)inputs.push(`[${broll.length+1+(music?1:0)}:a]`);filters.push(`${inputs.join('')}amix=inputs=${inputs.length}:duration=first:dropout_transition=2[aout]`);audio='[aout]'} return {graph:filters.join(';'),video,audio}
 }
 

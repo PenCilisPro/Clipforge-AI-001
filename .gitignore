@@ -27,3 +27,4 @@ dist-ssr
 *.sw?
 .dyad/
 renderer/bin/
+renderer/assets/fonts/

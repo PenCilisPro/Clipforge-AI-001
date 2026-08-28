@@ -9,7 +9,7 @@
     "worker:raw": "tsx ffmpegWorker.ts",
     "pipeline": "tsx pipeline-launcher.ts",
     "typecheck": "tsc --noEmit",
-    "postinstall": "node scripts/install-yt-dlp.mjs"
+    "postinstall": "node scripts/install-yt-dlp.mjs && node scripts/install-fonts.mjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
