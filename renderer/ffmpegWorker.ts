@@ -10,7 +10,14 @@ import { createClient } from '@supabase/supabase-js'
 import type { ClipConfiguration, BrollConfigItem } from './src/types'
 
 const require = createRequire(import.meta.url)
-const bundledFfmpeg = require('ffmpeg-static') as string | null
+// ffmpeg-static's bundled binary is missing the drawtext filter entirely
+// (verified: 0 hits in `ffmpeg -filters`, despite its own version banner
+// claiming --enable-libfreetype/--enable-fontconfig support) — every
+// caption-burning render was failing with "No such filter: 'drawtext'".
+// @ffmpeg-installer/ffmpeg is an older build (~2018) but does have it, and
+// nothing else this worker does (scale/crop/overlay/drawtext/libx264/aac)
+// needs anything newer.
+const bundledFfmpeg = require('@ffmpeg-installer/ffmpeg').path as string | null
 const bundledFfprobe = require('ffprobe-static') as { path?: string }
 
 const run = promisify(execFile)

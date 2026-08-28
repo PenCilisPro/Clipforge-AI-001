@@ -12,6 +12,7 @@
     "postinstall": "node scripts/install-yt-dlp.mjs"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@remotion/bundler": "4.0.505",
     "@remotion/cli": "4.0.505",
     "@remotion/renderer": "4.0.505",
