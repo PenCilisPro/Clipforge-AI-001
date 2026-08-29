@@ -61,7 +61,19 @@ async function signedSource(storagePath: string) { const { data, error } = await
 
 async function downloadYoutube(url: string, out: string) {
   if (RAPID_KEY) { try { const response = await fetch(`https://${RAPID_HOST}/v2/video/download?url=${encodeURIComponent(url)}`, { headers: { 'x-rapidapi-key': RAPID_KEY, 'x-rapidapi-host': RAPID_HOST } }); if (!response.ok) throw new Error(`RapidAPI HTTP ${response.status}`); const type = response.headers.get('content-type') || ''; if (!type.includes('json')) { await writeFile(out, Buffer.from(await response.arrayBuffer())); return } const data: any = await response.json(); const urls = [data?.downloadUrl,data?.download_url,data?.url,data?.link,data?.data?.downloadUrl,data?.data?.download_url,data?.data?.url,Array.isArray(data?.data)?data.data[0]?.url:null,Array.isArray(data?.formats)?data.formats.find((x:any)=>typeof x?.url==='string')?.url:null]; const media = urls.find((x): x is string => typeof x === 'string' && x.length > 0); if (!media) throw new Error('RapidAPI returned no media URL'); await download(media,out); return } catch (error) { console.warn(`[FFmpeg] RapidAPI failed: ${error instanceof Error ? error.message : String(error)}`) } }
-  const template = `${out}.%(ext)s`; await run(YTDLP,['--no-playlist','--no-warnings','--format','bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b','--merge-output-format','mp4','--output',template,url],{maxBuffer:10*1024*1024}); const file=[`${out}.mp4`,`${out}.webm`,`${out}.mkv`].find(existsSync); if (!file) throw new Error('yt-dlp finished without an output file'); await writeFile(out,await readFile(file))
+  // Same YTDLP_COOKIES support as pipeline.ts: paste a Netscape-format
+  // cookies.txt export from a logged-in YouTube session to work around
+  // "Sign in to confirm you're not a bot" on datacenter IPs.
+  const cookiesArgs: string[] = []
+  if (process.env.YTDLP_COOKIES) { const cookiesPath = `${out}.cookies.txt`; try { await writeFile(cookiesPath, process.env.YTDLP_COOKIES); cookiesArgs.push('--cookies', cookiesPath) } catch (error) { console.warn(`[FFmpeg] Failed to write YTDLP_COOKIES, continuing without cookies: ${error instanceof Error ? error.message : String(error)}`) } }
+  const template = `${out}.%(ext)s`
+  try {
+    await run(YTDLP,['--no-playlist','--no-warnings','--format','bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b','--merge-output-format','mp4','--output',template,'--extractor-args','youtube:player_client=android',url],{maxBuffer:20*1024*1024})
+  } catch (androidError) {
+    console.warn(`[FFmpeg] yt-dlp (android client) failed, retrying with default client: ${androidError instanceof Error ? androidError.message : String(androidError)}`)
+    await run(YTDLP,['--no-playlist','--no-warnings','--format','bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b','--merge-output-format','mp4','--output',template,...cookiesArgs,url],{maxBuffer:20*1024*1024})
+  }
+  const file=[`${out}.mp4`,`${out}.webm`,`${out}.mkv`].find(existsSync); if (!file) throw new Error('yt-dlp finished without an output file'); await writeFile(out,await readFile(file))
 }
 
 async function getSource(projectId: string, sourceType: string|null, sourceUrl: string|null, work: string, configuredSource?: string) {
