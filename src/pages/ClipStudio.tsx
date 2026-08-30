@@ -344,6 +344,25 @@ export default function ClipStudio() {
           })
           .catch(() => {})
       }
+
+      // If source is a manual upload, the stored value is a private-bucket path,
+      // not a fetchable URL - exchange it for a signed URL, same as the renderer does.
+      const storagePath = (videoRes.data as any)?.storage_path
+      if (sourceType === 'upload' && storagePath) {
+        supabase.storage
+          .from('sources')
+          .createSignedUrl(storagePath, 21600)
+          .then(({ data: signed }) => {
+            if (signed?.signedUrl) {
+              setConfig((prev) => {
+                if (!prev) return prev
+                const needsVideo = !prev.sourceVideo || !/^https?:|^blob:/i.test(prev.sourceVideo)
+                return needsVideo ? { ...prev, sourceVideo: signed.signedUrl } : prev
+              })
+            }
+          })
+          .catch(() => {})
+      }
     } catch (err) {
       console.error('Error loading clip in ClipStudio:', err)
     } finally {

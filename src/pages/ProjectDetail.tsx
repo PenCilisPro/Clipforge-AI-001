@@ -26,6 +26,7 @@ export default function ProjectDetail() {
   const [clips, setClips] = useState<Clip[]>([])
   const [sortKey, setSortKey] = useState<SortKey>('score')
   const [previewClip, setPreviewClip] = useState<Clip | null>(null)
+  const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null)
   const [showTranscript, setShowTranscript] = useState(false)
   const [retrying, setRetrying] = useState(false)
 
@@ -54,6 +55,24 @@ export default function ProjectDetail() {
     const interval = setInterval(() => void loadAll(), 1500)
     return () => clearInterval(interval)
   }, [project, loadAll])
+
+  // Manual uploads store a private-bucket path, not a fetchable URL - resolve
+  // a signed URL for the live preview player when it opens.
+  useEffect(() => {
+    setPreviewSourceUrl(null)
+    if (!previewClip || project?.source_type !== 'upload' || !video?.storage_path) return
+    let cancelled = false
+    supabase.storage
+      .from('sources')
+      .createSignedUrl(video.storage_path, 21600)
+      .then(({ data }) => {
+        if (!cancelled && data?.signedUrl) setPreviewSourceUrl(data.signedUrl)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [previewClip, project?.source_type, video?.storage_path])
 
   async function handleRunAiProcessing() {
     if (!projectId) return
@@ -251,9 +270,9 @@ export default function ProjectDetail() {
                       null,
                       previewClip,
                       {
-                        sourceUrl: project?.source_url || (video as any)?.storage_path,
+                        sourceUrl: project?.source_url || previewSourceUrl || undefined,
                         thumbnailUrl: previewClip.current_thumbnail_url || (project as any)?.thumbnail_url,
-                        storagePath: (video as any)?.storage_path,
+                        storagePath: previewSourceUrl || undefined,
                         sourceType: project?.source_type,
                         transcript,
                       },

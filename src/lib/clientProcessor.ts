@@ -118,11 +118,28 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
     // Save or update video record
     const { data: existingVideo } = await supabase
       .from('videos')
-      .select('id')
+      .select('id, storage_path')
       .eq('project_id', projectId)
       .maybeSingle()
 
-    const videoStoragePath = directStreamVideoUrl || directStreamAudioUrl || null
+    // Manual uploads: resolve the stored bucket path to a playable public URL
+    // for the clip config, WITHOUT touching what gets written back to
+    // videos.storage_path (that column stays the raw bucket path).
+    // (YouTube path already set directStreamVideoUrl above.)
+    let uploadPublicUrl: string | null = null
+    if (project.source_type === 'upload' && existingVideo?.storage_path) {
+      // 'sources' is a private bucket (see renderer/ffmpegWorker.ts signedSource) -
+      // needs a signed URL, not getPublicUrl.
+      const { data: signed } = await supabase.storage
+        .from('sources')
+        .createSignedUrl(existingVideo.storage_path, 21600)
+      uploadPublicUrl = signed?.signedUrl || null
+    }
+
+    // Never blank out a known storage path with null (e.g. this run only
+    // touched YouTube fields and has nothing new to say about the file).
+    const videoStoragePath =
+      directStreamVideoUrl || directStreamAudioUrl || existingVideo?.storage_path || null
 
     if (!existingVideo) {
       await supabase.from('videos').insert({
@@ -368,7 +385,7 @@ Return ONLY valid JSON matching this exact structure:
           clip_id: insertedClip.id,
           version_number: 1,
           configuration_json: {
-            sourceVideo: directStreamVideoUrl || null,
+            sourceVideo: directStreamVideoUrl || uploadPublicUrl || null,
             originalAudioUrl: directStreamAudioUrl || null,
             originalVolume: 1.0,
             startTime: c.startTime || 0,
