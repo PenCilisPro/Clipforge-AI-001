@@ -32,11 +32,9 @@ import { createClient } from "@supabase/supabase-js";
 
 import type {
   BrollConfigItem,
-  CaptionWordConfig,
   ClipConfiguration,
   MusicConfig,
 } from "./src/types";
-import { transcribeAudioFile } from "./googleStt";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,7 +57,6 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
 const MOONSHOT_API_KEY = requireEnv("MOONSHOT_API_KEY");
-const GOOGLE_STT_API_KEY = requireEnv("GOOGLE_STT_API_KEY");
 const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
 const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
@@ -1389,71 +1386,6 @@ async function sliceClipVideo(
 
 
 // ============================================================================
-// AUDIO EXTRACTION
-// ============================================================================
-
-async function extractClipAudio(
-  clipVideoPath: string,
-  outAudioPath: string,
-): Promise<string> {
-  // LINEAR16/WAV - the most broadly-supported sync encoding for Google STT,
-  // avoids container/codec edge cases that MP3 or AAC can hit.
-  await execFileAsync(
-    "ffmpeg",
-    [
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-i",
-      clipVideoPath,
-      "-vn",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "pcm_s16le",
-      outAudioPath,
-    ],
-    { maxBuffer: 20 * 1024 * 1024 },
-  );
-
-  return outAudioPath;
-}
-
-// ============================================================================
-// GOOGLE SPEECH-TO-TEXT (runs on the clipped audio only, not the source)
-// ============================================================================
-//
-// Shared with ffmpegWorker.ts (renderer/googleStt.ts) so the automated
-// worker path and the finished-render fallback path can't drift apart.
-
-async function transcribeClippedAudio(
-  clipAudioPath: string,
-  clipDurationSec: number,
-): Promise<{
-  words: CaptionWordConfig[];
-  text: string;
-}> {
-  const { words, text } = await transcribeAudioFile(
-    clipAudioPath,
-    clipDurationSec,
-    GOOGLE_STT_API_KEY,
-  );
-
-  return {
-    words: words.map((w) => ({
-      text: w.text,
-      start: w.start,
-      end: w.end,
-    })),
-    text,
-  };
-}
-
-
-// ============================================================================
 // B-ROLL — PEXELS
 // ============================================================================
 
@@ -1917,28 +1849,10 @@ async function processProject(
         candidate.cropX,
       );
 
-      // --------------------------------------------------------------------
-      // C. GOOGLE SPEECH-TO-TEXT (on the rendered clip only, not source)
-      // --------------------------------------------------------------------
-
-      const clipAudioPath =
-        path.join(
-          workDir,
-          `clip_audio_${clip.id}.wav`,
-        );
-
-      await extractClipAudio(
-        clipVideoPath,
-        clipAudioPath,
-      );
-
-      const {
-        words: sttWords,
-      } =
-        await transcribeClippedAudio(
-          clipAudioPath,
-          candidate.end - candidate.start,
-        );
+      // Captions no longer generated here. Single flow now: Remotion/ffmpeg
+      // renders the clip, THEN the finished render's audio goes to Google
+      // STT, THEN captions get burned in - all in ffmpegWorker.ts, one path
+      // shared by every clip regardless of where it came from.
 
       // --------------------------------------------------------------------
       // D. UPLOAD INTERMEDIATE SOURCE
@@ -2050,7 +1964,7 @@ async function processProject(
             lineSpacing: 1.2,
           },
 
-          words: sttWords,
+          words: [],
         },
 
         broll: broll

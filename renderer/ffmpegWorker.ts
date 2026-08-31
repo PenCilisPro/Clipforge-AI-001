@@ -78,15 +78,13 @@ async function render(config:ClipConfiguration,sourceFile:string,broll:Array<Bro
 async function processJob(job:Job){
   const work=path.join(os.tmpdir(),`clipforge-${job.id}`);await rm(work,{recursive:true,force:true});await mkdir(work,{recursive:true});
   try{await updateJob(job.id,{status:'RENDERING',stage:'LOADING_SOURCE',progress:2,started_at:new Date().toISOString(),error_message:null});const {data:v,error:ve}=await supabase.from('clip_versions').select('id,version_number,configuration_json').eq('id',job.clip_version_id).single();if(ve||!v)throw new Error(ve?.message||'clip version not found');const version=v as Version;const {data:c,error:ce}=await supabase.from('clips').select('id,project_id').eq('id',job.clip_id).single();if(ce||!c)throw new Error(ce?.message||'clip not found');const {data:p,error:pe}=await supabase.from('projects').select('id,source_type,source_url').eq('id',c.project_id).single();if(pe||!p)throw new Error(pe?.message||'project not found');const config={...version.configuration_json} as ClipConfiguration;let effectiveConfig=config;const sourceFile=await getSource(p.id,p.source_type,p.source_url,work,config.sourceVideo);await updateJob(job.id,{stage:'DOWNLOADING_BROLL',progress:12});const broll=await getBroll(config,work);const music=await optional(config.music?.audioUrl,work,'music.bin');const voice=await optional(config.voiceUrl,work,'voice.bin');await updateJob(job.id,{stage:'FFMPEG_EDITING',progress:20});const out=path.join(work,'finished.mp4');await render(effectiveConfig,sourceFile,broll,music,voice,out);await updateJob(job.id,{stage:'VALIDATING',progress:88});let probe=await run(FFPROBE,['-v','error','-select_streams','v:0','-show_entries','stream=codec_type','-of','csv=p=0',out]);if(probe.stdout.trim()!=='video')throw new Error('FFmpeg produced no video stream');
-    // Clips created via the browser path (clientProcessor.ts) arrive here with no
-    // caption words yet - the automated Node pipeline (pipeline.ts) already ran
-    // Google STT on an intermediate clip before this job was even created, so it
-    // skips this. This is the "send the finished clip to Google STT" step for the
-    // path that doesn't pre-compute captions: transcribe the render we just made,
-    // then re-render once more with the resulting words burned in.
-    const hasWords = Array.isArray(config.captions?.words) && (config.captions?.words?.length ?? 0) > 0
+    // Single caption path for every clip, regardless of where it came from:
+    // Remotion/ffmpeg renders the clip first (no captions baked in yet),
+    // THEN the finished render's audio goes to Google STT, THEN one more
+    // render burns the resulting words in. Nothing pre-computes captions
+    // before this point anymore.
     const wantsCaptions = config.captions?.enabled !== false
-    if (!hasWords && wantsCaptions) {
+    if (wantsCaptions) {
       await updateJob(job.id,{stage:'TRANSCRIBING',progress:90})
       try {
         const sttAudioPath = path.join(work,'stt_audio.wav')
