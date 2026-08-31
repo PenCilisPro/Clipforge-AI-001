@@ -962,14 +962,19 @@ async function findMomentsWithMultimodalAI(
     8,
   );
 
-  const durationTarget =
+  // 'ai' preset = no user-picked bound, AI decides freely within a sane range.
+  // Every other preset is a hard guarantee, not just a prompt hint - clamped
+  // below regardless of what the model actually returns.
+  const durationBounds: [number, number] =
     project.clip_duration_preset === "15-30"
-      ? "20-30"
+      ? [15, 30]
       : project.clip_duration_preset === "60-90"
-        ? "60-90"
-        : project.clip_duration_preset === "ai"
-          ? "30-60"
-          : "30-55";
+        ? [60, 90]
+        : project.clip_duration_preset === "30-60"
+          ? [30, 60]
+          : [20, 60];
+
+  const durationTarget = `${durationBounds[0]}-${durationBounds[1]}`;
 
   try {
     const [frames, energyWindows] = await Promise.all([
@@ -1070,10 +1075,11 @@ Rules:
       );
 
       return createFallbackCandidates(
-        title,
-        duration,
-        targetCount,
-      );
+      title,
+      duration,
+      targetCount,
+      durationBounds,
+    );
     }
 
     const json = (await response.json()) as any;
@@ -1087,10 +1093,11 @@ Rules:
       );
 
       return createFallbackCandidates(
-        title,
-        duration,
-        targetCount,
-      );
+      title,
+      duration,
+      targetCount,
+      durationBounds,
+    );
     }
 
     const cleanedText = text
@@ -1106,10 +1113,11 @@ Rules:
       parsed.clips.length === 0
     ) {
       return createFallbackCandidates(
-        title,
-        duration,
-        targetCount,
-      );
+      title,
+      duration,
+      targetCount,
+      durationBounds,
+    );
     }
 
     const candidates: Candidate[] = parsed.clips
@@ -1127,8 +1135,29 @@ Rules:
       })
       .slice(0, targetCount)
       .map((clip: any) => {
-        const start = Math.max(0, Number(clip.start));
-        const end = Math.min(duration, Number(clip.end));
+        const rawStart = Math.max(0, Number(clip.start));
+        const rawEnd = Math.min(duration, Number(clip.end));
+
+        // Hard guarantee on clip length, regardless of what the model
+        // returned - it only gets a soft hint via the prompt text above.
+        const [minLen, maxLen] = durationBounds;
+        const rawLen = Math.max(0.1, rawEnd - rawStart);
+        const targetLen = Math.min(
+          Math.max(rawLen, minLen),
+          maxLen,
+          duration,
+        );
+
+        // Keep the AI's chosen center point, just resize around it so the
+        // hook/moment it picked stays roughly centered in the new length.
+        const center = (rawStart + rawEnd) / 2;
+        let start = Math.max(0, center - targetLen / 2);
+        let end = start + targetLen;
+
+        if (end > duration) {
+          end = duration;
+          start = Math.max(0, end - targetLen);
+        }
 
         const cropX = Math.min(
           1,
@@ -1199,10 +1228,11 @@ Rules:
   }
 
   return createFallbackCandidates(
-    title,
-    duration,
-    targetCount,
-  );
+      title,
+      duration,
+      targetCount,
+      durationBounds,
+    );
 }
 
 // ============================================================================
@@ -1213,13 +1243,14 @@ function createFallbackCandidates(
   title: string,
   duration: number,
   targetCount: number,
+  durationBounds: [number, number] = [20, 30],
 ): Candidate[] {
   const fallback: Candidate[] = [];
 
   const clipLength =
     Math.min(
-      30,
-      Math.max(3, duration),
+      durationBounds[1],
+      Math.max(durationBounds[0], 3, duration),
     );
 
   const step =
