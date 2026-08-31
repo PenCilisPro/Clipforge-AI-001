@@ -851,20 +851,29 @@ async function extractSampleFrames(
     );
 
     try {
-      await execFileAsync("ffmpeg", [
-        "-y",
-        "-ss",
-        String(timeSec),
-        "-i",
-        sourcePath,
-        "-frames:v",
-        "1",
-        "-q:v",
-        "4",
-        "-vf",
-        "scale=480:-2",
-        framePath,
-      ]);
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-y",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-threads",
+          "2",
+          "-ss",
+          String(timeSec),
+          "-i",
+          sourcePath,
+          "-frames:v",
+          "1",
+          "-q:v",
+          "4",
+          "-vf",
+          "scale=480:-2",
+          framePath,
+        ],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
 
       const base64 = readFileSync(framePath).toString(
         "base64",
@@ -900,21 +909,28 @@ async function extractEnergyCurve(
     const startSec = i * windowLength;
 
     try {
-      const { stderr } = await execFileAsync("ffmpeg", [
-        "-y",
-        "-ss",
-        String(startSec),
-        "-t",
-        String(windowLength),
-        "-i",
-        sourcePath,
-        "-af",
-        "volumedetect",
-        "-vn",
-        "-f",
-        "null",
-        "-",
-      ]);
+      const { stderr } = await execFileAsync(
+        "ffmpeg",
+        [
+          "-y",
+          "-hide_banner",
+          "-threads",
+          "2",
+          "-ss",
+          String(startSec),
+          "-t",
+          String(windowLength),
+          "-i",
+          sourcePath,
+          "-af",
+          "volumedetect",
+          "-vn",
+          "-f",
+          "null",
+          "-",
+        ],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
 
       const match = stderr.match(
         /mean_volume:\s*(-?\d+(\.\d+)?)\s*dB/,
@@ -1032,6 +1048,7 @@ Rules:
         body: JSON.stringify({
           model: OPENROUTER_VISION_MODEL,
           response_format: { type: "json_object" },
+          max_tokens: 4096,
           messages: [
             {
               role: "user",
@@ -1304,6 +1321,11 @@ async function sliceClipVideo(
     "ffmpeg",
     [
       "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-threads",
+      "2",
       "-ss",
       String(start),
       "-t",
@@ -1320,6 +1342,8 @@ async function sliceClipVideo(
       "fast",
       "-crf",
       "23",
+      "-threads",
+      "2",
 
       "-c:a",
       "aac",
@@ -1328,6 +1352,7 @@ async function sliceClipVideo(
 
       outPath,
     ],
+    { maxBuffer: 20 * 1024 * 1024 },
   );
 
   return outPath;
@@ -1348,6 +1373,9 @@ async function extractClipAudio(
     "ffmpeg",
     [
       "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
       "-i",
       clipVideoPath,
       "-vn",
@@ -1359,6 +1387,7 @@ async function extractClipAudio(
       "pcm_s16le",
       outAudioPath,
     ],
+    { maxBuffer: 20 * 1024 * 1024 },
   );
 
   return outAudioPath;

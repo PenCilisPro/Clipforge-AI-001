@@ -72,7 +72,7 @@ function makeFilters(config:ClipConfiguration,broll:Array<BrollConfigItem & {fil
 }
 
 async function render(config:ClipConfiguration,sourceFile:string,broll:Array<BrollConfigItem & {file:string}>,music:string|null,voice:string|null,out:string){
-  const w=Math.max(240,Math.round(num(config.resolution?.width,1080)));const h=Math.max(240,Math.round(num(config.resolution?.height,1920)));const start=Math.max(0,num(config.startTime));const duration=Math.max(.05,num(config.endTime,start+30)-start);const args=['-y','-ss',String(start),'-t',String(duration),'-i',sourceFile];broll.forEach(b=>args.push('-i',b.file));if(music)args.push('-i',music);if(voice)args.push('-i',voice);const f=makeFilters(config,broll,Boolean(music),Boolean(voice),w,h);args.push('-filter_complex',f.graph,'-map',f.video,'-map',f.audio,'-c:v','libx264','-preset',process.env.FFMPEG_PRESET||'veryfast','-crf',process.env.FFMPEG_CRF||'20','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k','-movflags','+faststart','-shortest',out);await run(FFMPEG,args,{maxBuffer:20*1024*1024})
+  const w=Math.max(240,Math.round(num(config.resolution?.width,1080)));const h=Math.max(240,Math.round(num(config.resolution?.height,1920)));const start=Math.max(0,num(config.startTime));const duration=Math.max(.05,num(config.endTime,start+30)-start);const args=['-y','-hide_banner','-loglevel','error','-threads','2','-ss',String(start),'-t',String(duration),'-i',sourceFile];broll.forEach(b=>args.push('-i',b.file));if(music)args.push('-i',music);if(voice)args.push('-i',voice);const f=makeFilters(config,broll,Boolean(music),Boolean(voice),w,h);args.push('-filter_complex',f.graph,'-map',f.video,'-map',f.audio,'-c:v','libx264','-preset',process.env.FFMPEG_PRESET||'veryfast','-crf',process.env.FFMPEG_CRF||'20','-threads','2','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k','-movflags','+faststart','-shortest',out);await run(FFMPEG,args,{maxBuffer:20*1024*1024})
 }
 
 async function processJob(job:Job){
@@ -90,7 +90,7 @@ async function processJob(job:Job){
       await updateJob(job.id,{stage:'TRANSCRIBING',progress:90})
       try {
         const sttAudioPath = path.join(work,'stt_audio.wav')
-        await run(FFMPEG,['-y','-i',out,'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',sttAudioPath])
+        await run(FFMPEG,['-y','-hide_banner','-loglevel','error','-i',out,'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',sttAudioPath],{maxBuffer:20*1024*1024})
         const clipStart = Math.max(0,num(config.startTime))
         const clipDuration = Math.max(0.05,num(config.endTime,clipStart+30)-clipStart)
         const { words: sttWords } = await transcribeAudioFile(sttAudioPath,clipDuration,GOOGLE_STT_API_KEY)
