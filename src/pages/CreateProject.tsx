@@ -1,11 +1,11 @@
-import { useEffect, useState, type DragEvent } from 'react'
+import { useState, type DragEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Upload, Loader2, FileVideo, X } from 'lucide-react'
 import { YoutubeIcon } from '@/components/icons'
 import { supabase, invokeFunction } from '@/lib/supabase'
 import { processProjectInBrowser } from '@/lib/clientProcessor'
 import { useAuth } from '@/hooks/useAuth'
-import type { PatternSet, DurationPreset } from '@/lib/types'
+import type { DurationPreset } from '@/lib/types'
 import { formatFileSize, classNames } from '@/lib/format'
 import { PageHeader, ProgressBar } from '@/components/ui'
 
@@ -16,7 +16,6 @@ const ACCEPTED_TYPES = ['video/mp4', 'video/quicktime', 'video/webm']
 
 interface ProjectConfig {
   name: string
-  patternSetId: string | null
   durationPreset: DurationPreset
   maxClips: number
   autoBroll: boolean
@@ -37,12 +36,10 @@ export default function CreateProject() {
   const [file, setFile] = useState<File | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
-  const [patternSets, setPatternSets] = useState<PatternSet[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [config, setConfig] = useState<ProjectConfig>({
     name: '',
-    patternSetId: null,
     durationPreset: 'ai',
     maxClips: 10,
     autoBroll: true,
@@ -50,19 +47,6 @@ export default function CreateProject() {
     captionPreset: 'bold',
     aiOptimization: true,
   })
-
-  useEffect(() => {
-    supabase
-      .from('pattern_sets')
-      .select('*')
-      .order('created_at')
-      .then(({ data }) => {
-        const sets = (data as PatternSet[]) ?? []
-        setPatternSets(sets)
-        const active = sets.find((s) => s.is_active)
-        if (active) setConfig((c) => ({ ...c, patternSetId: active.id }))
-      })
-  }, [])
 
   function handleFileSelected(f: File) {
     if (!ACCEPTED_TYPES.includes(f.type)) {
@@ -105,7 +89,6 @@ export default function CreateProject() {
           source_type: tab,
           source_url: tab === 'youtube' ? youtubeUrl.trim() : null,
           status: tab === 'upload' ? 'UPLOADING' : 'QUEUED',
-          pattern_set_id: config.patternSetId,
           clip_duration_preset: config.durationPreset,
           max_clips: config.maxClips,
           auto_broll: config.autoBroll,
@@ -251,22 +234,6 @@ export default function CreateProject() {
               value={config.name}
               onChange={(e) => setConfig({ ...config, name: e.target.value })}
             />
-          </div>
-          <div>
-            <label className="label">Pattern Set</label>
-            <select
-              className="input"
-              value={config.patternSetId ?? ''}
-              onChange={(e) => setConfig({ ...config, patternSetId: e.target.value || null })}
-            >
-              <option value="">No pattern set</option>
-              {patternSets.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                  {s.is_active ? ' (active)' : ''}
-                </option>
-              ))}
-            </select>
           </div>
           <div>
             <label className="label">Clip Duration</label>

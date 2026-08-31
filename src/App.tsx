@@ -13,8 +13,6 @@ import ClipStudio from '@/pages/ClipStudio'
 import CalendarPage from '@/pages/CalendarPage'
 import MediaLibrary from '@/pages/MediaLibrary'
 import AIPage from '@/pages/AIPage'
-import PatternLibrary from '@/pages/PatternLibrary'
-import CSVImport from '@/pages/CSVImport'
 import Analytics from '@/pages/Analytics'
 import SettingsPage from '@/pages/SettingsPage'
 import PrivacyPolicy from '@/pages/PrivacyPolicy'
@@ -58,8 +56,6 @@ export default function App() {
               <Route path="/calendar" element={<CalendarPage />} />
               <Route path="/media" element={<MediaLibrary />} />
               <Route path="/ai" element={<AIPage />} />
-              <Route path="/patterns" element={<PatternLibrary />} />
-              <Route path="/csv-import" element={<CSVImport />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />

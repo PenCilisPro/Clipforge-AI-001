@@ -1,10 +1,10 @@
 import { supabase } from './supabase'
-import type { Project, Pattern } from './types'
+import type { Project } from './types'
 import { resolveYoutubeStream } from './youtubeResolver'
 
 // Require environment variables for API keys - no fallback defaults for security
-const OPENAI_API_KEY =
-  (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_OPENROUTER_API_KEY || import.meta.env?.VITE_OPENAI_API_KEY)) ||
+const MOONSHOT_API_KEY =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_MOONSHOT_API_KEY) ||
   ''
 const YOUTUBE_API_KEY =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_YOUTUBE_API_KEY) ||
@@ -12,8 +12,8 @@ const YOUTUBE_API_KEY =
 
 // Validate required environment variables in non-production environments
 if (typeof import.meta !== 'undefined' && import.meta.env?.MODE !== 'production') {
-  if (!OPENAI_API_KEY) {
-    console.warn('⚠️ VITE_OPENAI_API_KEY or VITE_OPENROUTER_API_KEY not provided. AI features will be limited.')
+  if (!MOONSHOT_API_KEY) {
+    console.warn('⚠️ VITE_MOONSHOT_API_KEY not provided. AI features will be limited.')
   }
   if (!YOUTUBE_API_KEY) {
     console.warn('⚠️ VITE_YOUTUBE_API_KEY not provided. YouTube metadata features will be limited.')
@@ -169,28 +169,35 @@ export async function processProjectInBrowser(projectId: string): Promise<void> 
     await updateProjectStatus(projectId, 'TRANSCRIBING', 48)
     await delay(800)
 
-    // Fetch active patterns
-    const { data: patternsData } = await supabase
-      .from('patterns')
-      .select('*')
-      .eq('is_active', true)
-    const patterns = (patternsData as Pattern[]) || []
-
     await updateProjectStatus(projectId, 'ANALYZING', 65)
     await delay(600)
 
     await updateProjectStatus(projectId, 'MATCHING_PATTERNS', 75)
 
-    // Ask AI (OpenRouter / Claude Opus 5) to detect clips and transcript
+    // Pattern-set matching removed - Kimi picks moments on its own now, no
+    // user-curated category list. ('MATCHING_PATTERNS' status name kept as
+    // the internal enum value other UI reads - it's just "AI generating
+    // candidates" now, not literal pattern matching.)
+    const durationBounds: [number, number] =
+      project.clip_duration_preset === '15-30'
+        ? [15, 30]
+        : project.clip_duration_preset === '60-90'
+          ? [60, 90]
+          : project.clip_duration_preset === '30-60'
+            ? [30, 60]
+            : [20, 60]
+
+    // Ask Kimi (Moonshot AI) to detect clips and transcript. NOTE: this still
+    // can't see the actual video/audio from the browser (no frame or energy
+    // extraction here, unlike the server pipeline's multimodal path) - it's
+    // working from the title/metadata only. Real per-frame analysis for
+    // browser uploads is a separate follow-up, not done in this pass.
     const prompt = `You are ClipForge AI, an elite viral video clipping engine.
 Analyze this video:
 Title: "${title}"
 Source: ${project.source_url || 'Uploaded Video'}
-Preset Duration: ${project.clip_duration_preset} (seconds or ai)
+Target clip length: ${durationBounds[0]}-${durationBounds[1]} seconds
 Target Clips: ${project.max_clips || 6}
-
-Available Viral Hook Patterns:
-${patterns.map((p) => `- ID: ${p.id}, Name: "${p.name}", Category: "${p.category}", Signal: "${p.start_signal}"`).join('\n')}
 
 Generate:
 1. An engaging transcript with 6-10 chronological segment intervals (start, end, text).
@@ -198,17 +205,15 @@ Generate:
    - title: Punchy, high CTR title
    - hook: The first 3-second opening hook phrase
    - topic: Main subject
-   - category: e.g. "Insight", "Controversial", "Story", "How-To", "Mindset"
+   - category: e.g. "Insight", "Story", "How-To", "Reaction", "Highlight"
    - startTime: seconds (e.g. 0, 35, 75, 120, etc.)
-   - endTime: seconds (duration should be 20-60s)
+   - endTime: seconds (duration must be ${durationBounds[0]}-${durationBounds[1]}s)
    - score: 85-98 (viral probability)
    - hookScore: 85-99
    - engagementScore: 85-99
    - emotionalScore: 80-98
    - shareabilityScore: 85-99
    - completenessScore: 90-99
-   - matchedPatternId: pattern ID if applicable (or null)
-   - matchedPatternName: pattern name if applicable (or null)
 
 Return ONLY valid JSON matching this exact structure:
 {
@@ -229,9 +234,7 @@ Return ONLY valid JSON matching this exact structure:
       "engagementScore": 96,
       "emotionalScore": 92,
       "shareabilityScore": 94,
-      "completenessScore": 95,
-      "matchedPatternId": null,
-      "matchedPatternName": null
+      "completenessScore": 95
     }
   ]
 }`
@@ -240,16 +243,14 @@ Return ONLY valid JSON matching this exact structure:
     let transcriptSegments: any[] = []
 
     try {
-      const aiRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const aiRes = await fetch('https://api.moonshot.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          Authorization: `Bearer ${MOONSHOT_API_KEY}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://clipforge.app',
-          'X-Title': 'ClipForge AI',
         },
         body: JSON.stringify({
-          model: 'anthropic/claude-opus-5',
+          model: 'kimi-k3',
           response_format: { type: 'json_object' },
           messages: [
             {
@@ -266,7 +267,19 @@ Return ONLY valid JSON matching this exact structure:
         const aiJson = await aiRes.json()
         const parsed = JSON.parse(aiJson.choices?.[0]?.message?.content || '{}')
         if (Array.isArray(parsed.clips) && parsed.clips.length > 0) {
-          clipsToInsert = parsed.clips
+          // Hard-clamp duration to the user's preset - same guarantee as the
+          // server pipeline, regardless of whether Kimi honored the hint.
+          clipsToInsert = parsed.clips.map((clip: any) => {
+            const rawStart = Math.max(0, Number(clip.startTime) || 0)
+            const rawEnd = Math.max(rawStart + 1, Number(clip.endTime) || rawStart + durationBounds[0])
+            const [minLen, maxLen] = durationBounds
+            const rawLen = Math.max(0.1, rawEnd - rawStart)
+            const targetLen = Math.min(Math.max(rawLen, minLen), maxLen)
+            const center = (rawStart + rawEnd) / 2
+            const start = Math.max(0, center - targetLen / 2)
+            const end = start + targetLen
+            return { ...clip, startTime: start, endTime: end }
+          })
         }
         if (Array.isArray(parsed.transcript) && parsed.transcript.length > 0) {
           transcriptSegments = parsed.transcript
@@ -285,50 +298,47 @@ Return ONLY valid JSON matching this exact structure:
           topic: title,
           category: 'Insight',
           startTime: 0,
-          endTime: 32,
+          endTime: durationBounds[0],
           score: 95,
           hookScore: 96,
           engagementScore: 94,
           emotionalScore: 90,
           shareabilityScore: 95,
           completenessScore: 98,
-          matchedPatternName: 'The Counter-Intuitive Truth',
         },
         {
           title: 'Why 99% Fail at This One Crucial Step',
           hook: 'If you only take away one thing from this, remember this...',
           topic: title,
           category: 'High Retention',
-          startTime: 35,
-          endTime: 68,
+          startTime: durationBounds[0] + 5,
+          endTime: durationBounds[0] + 5 + durationBounds[0],
           score: 92,
           hookScore: 93,
           engagementScore: 91,
           emotionalScore: 88,
           shareabilityScore: 92,
           completenessScore: 95,
-          matchedPatternName: 'The Critical Warning',
         },
         {
           title: 'The Blueprint Nobody Is Talking About',
           hook: 'Here is what actually changes the game when you apply it.',
           topic: title,
           category: 'Strategy',
-          startTime: 72,
-          endTime: 104,
+          startTime: (durationBounds[0] + 5) * 2,
+          endTime: (durationBounds[0] + 5) * 2 + durationBounds[0],
           score: 89,
           hookScore: 90,
           engagementScore: 89,
           emotionalScore: 86,
           shareabilityScore: 90,
           completenessScore: 94,
-          matchedPatternName: 'The Secret Blueprint',
         },
       ]
       transcriptSegments = [
-        { start: 0, end: 32, text: `Introduction and critical secret regarding ${title}.` },
-        { start: 35, end: 68, text: 'Detailed breakdown of the most common pitfalls and real solutions.' },
-        { start: 72, end: 104, text: 'Actionable step-by-step strategy for immediate execution.' },
+        { start: 0, end: durationBounds[0], text: `Introduction and critical secret regarding ${title}.` },
+        { start: durationBounds[0] + 5, end: durationBounds[0] + 5 + durationBounds[0], text: 'Detailed breakdown of the most common pitfalls and real solutions.' },
+        { start: (durationBounds[0] + 5) * 2, end: (durationBounds[0] + 5) * 2 + durationBounds[0], text: 'Actionable step-by-step strategy for immediate execution.' },
       ]
     }
 
@@ -369,7 +379,7 @@ Return ONLY valid JSON matching this exact structure:
           emotional_score: c.emotionalScore || 85,
           shareability_score: c.shareabilityScore || 90,
           completeness_score: c.completenessScore || 95,
-          matched_pattern_name: c.matchedPatternName || null,
+          matched_pattern_name: null,
           status: 'DETECTED',
           current_thumbnail_url: thumbnailUrl,
           // The resolved stream is the source footage, not a rendered clip. Keeping it

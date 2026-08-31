@@ -58,7 +58,7 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
+const MOONSHOT_API_KEY = requireEnv("MOONSHOT_API_KEY");
 const GOOGLE_STT_API_KEY = requireEnv("GOOGLE_STT_API_KEY");
 const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
@@ -68,21 +68,19 @@ const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
 
-// Vision-capable model reached through OpenRouter's unified API. Overridable
-// since OpenRouter model slugs change more often than most env config.
-const OPENROUTER_VISION_MODEL =
-  process.env.OPENROUTER_VISION_MODEL ||
-  "google/gemini-2.5-flash";
+// Official Moonshot AI (Kimi) API, not a third-party router. kimi-k3 is the
+// current vision-capable flagship as of writing - the moonshot-v1-* family
+// is being sunset, don't default back to those. Overridable regardless.
+const KIMI_VISION_MODEL =
+  process.env.KIMI_VISION_MODEL || "kimi-k3";
 
 // ============================================================================
 // API HEADERS
 // ============================================================================
 
-const openRouterHeaders: Record<string, string> = {
-  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+const moonshotHeaders: Record<string, string> = {
+  Authorization: `Bearer ${MOONSHOT_API_KEY}`,
   "Content-Type": "application/json",
-  "HTTP-Referer": "https://clipforge.app",
-  "X-Title": "ClipForge AI",
 };
 
 const rapidApiHeaders: Record<string, string> = {
@@ -1046,12 +1044,12 @@ Rules:
     }));
 
     const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
+      "https://api.moonshot.ai/v1/chat/completions",
       {
         method: "POST",
-        headers: openRouterHeaders,
+        headers: moonshotHeaders,
         body: JSON.stringify({
-          model: OPENROUTER_VISION_MODEL,
+          model: KIMI_VISION_MODEL,
           response_format: { type: "json_object" },
           max_tokens: 4096,
           messages: [
@@ -1071,7 +1069,7 @@ Rules:
       const errorText = await response.text();
 
       console.warn(
-        `OpenRouter returned ${response.status}: ${errorText}`,
+        `Kimi (Moonshot) returned ${response.status}: ${errorText}`,
       );
 
       return createFallbackCandidates(
@@ -1089,7 +1087,7 @@ Rules:
 
     if (!text) {
       console.warn(
-        "OpenRouter returned empty content.",
+        "Kimi (Moonshot) returned empty content.",
       );
 
       return createFallbackCandidates(
