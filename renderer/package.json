@@ -15,6 +15,7 @@
     "@remotion/cli": "4.0.505",
     "@remotion/renderer": "4.0.505",
     "@supabase/supabase-js": "^2.74.0",
+    "@types/node": "^22.10.0",
     "dotenv": "^17.2.2",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",

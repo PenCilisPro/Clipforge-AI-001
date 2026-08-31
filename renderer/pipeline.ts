@@ -36,6 +36,7 @@ import type {
   ClipConfiguration,
   MusicConfig,
 } from "./src/types";
+import { transcribeAudioFile } from "./googleStt";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,8 +58,8 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
-const ANTHROPIC_API_KEY = requireEnv("ANTHROPIC_API_KEY");
+const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
+const GOOGLE_STT_API_KEY = requireEnv("GOOGLE_STT_API_KEY");
 const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
 const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
@@ -67,17 +68,21 @@ const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
 
-const ANTHROPIC_MODEL =
-  process.env.ANTHROPIC_MODEL || "claude-opus-4-1";
+// Vision-capable model reached through OpenRouter's unified API. Overridable
+// since OpenRouter model slugs change more often than most env config.
+const OPENROUTER_VISION_MODEL =
+  process.env.OPENROUTER_VISION_MODEL ||
+  "google/gemini-2.5-flash";
 
 // ============================================================================
 // API HEADERS
 // ============================================================================
 
-const anthropicHeaders: Record<string, string> = {
-  "x-api-key": ANTHROPIC_API_KEY,
-  "anthropic-version": "2023-06-01",
-  "content-type": "application/json",
+const openRouterHeaders: Record<string, string> = {
+  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+  "Content-Type": "application/json",
+  "HTTP-Referer": "https://clipforge.app",
+  "X-Title": "ClipForge AI",
 };
 
 const rapidApiHeaders: Record<string, string> = {
@@ -87,10 +92,6 @@ const rapidApiHeaders: Record<string, string> = {
 
 const pexelsHeaders: Record<string, string> = {
   Authorization: PEXELS_API_KEY,
-};
-
-const openAiHeaders: Record<string, string> = {
-  Authorization: `Bearer ${OPENAI_API_KEY}`,
 };
 
 // ============================================================================
@@ -153,17 +154,6 @@ interface VideoRow {
   youtube_video_id: string | null;
 }
 
-interface PatternRow {
-  id: string;
-  name: string;
-  category: string;
-  start_signal: string;
-  end_signal: string;
-  score: number;
-  keywords: string[];
-  is_active: boolean;
-}
-
 interface Candidate {
   start: number;
   end: number;
@@ -172,10 +162,15 @@ interface Candidate {
   topic: string;
   category: string;
 
+  // Horizontal focal point for the 9:16 crop, 0 (left) - 1 (right), 0.5 = center.
+  cropX: number;
+
+  // Pattern matching removed - AI picks moments solely on its own judgment.
+  // Fields kept only because the `clips` table still has these columns.
   patternId: string | null;
   patternName: string | null;
-
   patternScore: number;
+
   hookScore: number;
   engagementScore: number;
   emotionalScore: number;
@@ -817,15 +812,134 @@ async function probeVideo(
   };
 }
 
-// ============================================================================
-// CLAUDE CANDIDATE DETECTION
-// ============================================================================
 
-async function findMomentsWithClaude(
+// ============================================================================
+// MULTIMODAL MOMENT DETECTION (frames + audio energy, no transcript)
+// ============================================================================
+//
+// Picks clip-worthy moments AND a 9:16 crop focal point by actually looking
+// at sampled frames and a rough loudness curve from the source video - not
+// by asking an LLM to guess from the title (that was the old behavior).
+// No pattern list, no user-supplied categories - AI decides on its own.
+
+const MOMENT_FRAME_COUNT = 10;
+const ENERGY_WINDOW_COUNT = 24;
+
+interface EnergyWindow {
+  startSec: number;
+  meanDb: number;
+}
+
+async function extractSampleFrames(
+  sourcePath: string,
+  duration: number,
+  workDir: string,
+): Promise<{ timeSec: number; base64: string }[]> {
+  const frames: { timeSec: number; base64: string }[] = [];
+
+  for (let i = 0; i < MOMENT_FRAME_COUNT; i++) {
+    // Skip the very first/last instants - often black frames or logos.
+    const fraction = (i + 0.5) / MOMENT_FRAME_COUNT;
+    const timeSec = Math.min(
+      Math.max(0, duration * fraction),
+      Math.max(0, duration - 0.2),
+    );
+
+    const framePath = path.join(
+      workDir,
+      `moment_frame_${i}.jpg`,
+    );
+
+    try {
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-ss",
+        String(timeSec),
+        "-i",
+        sourcePath,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "4",
+        "-vf",
+        "scale=480:-2",
+        framePath,
+      ]);
+
+      const base64 = readFileSync(framePath).toString(
+        "base64",
+      );
+
+      frames.push({ timeSec, base64 });
+    } catch (error) {
+      console.warn(
+        `Frame extraction failed at ${timeSec}s:`,
+        error instanceof Error
+          ? error.message
+          : String(error),
+      );
+    }
+  }
+
+  return frames;
+}
+
+async function extractEnergyCurve(
+  sourcePath: string,
+  duration: number,
+): Promise<EnergyWindow[]> {
+  const windowCount = Math.min(
+    ENERGY_WINDOW_COUNT,
+    Math.max(1, Math.floor(duration / 3)),
+  );
+
+  const windowLength = duration / windowCount;
+  const windows: EnergyWindow[] = [];
+
+  for (let i = 0; i < windowCount; i++) {
+    const startSec = i * windowLength;
+
+    try {
+      const { stderr } = await execFileAsync("ffmpeg", [
+        "-y",
+        "-ss",
+        String(startSec),
+        "-t",
+        String(windowLength),
+        "-i",
+        sourcePath,
+        "-af",
+        "volumedetect",
+        "-vn",
+        "-f",
+        "null",
+        "-",
+      ]);
+
+      const match = stderr.match(
+        /mean_volume:\s*(-?\d+(\.\d+)?)\s*dB/,
+      );
+
+      const meanDb = match
+        ? parseFloat(match[1])
+        : -100;
+
+      windows.push({ startSec, meanDb });
+    } catch (error) {
+      // A window failing (e.g. silence-only) shouldn't abort the whole scan.
+      windows.push({ startSec, meanDb: -100 });
+    }
+  }
+
+  return windows;
+}
+
+async function findMomentsWithMultimodalAI(
   project: ProjectRow,
   title: string,
   duration: number,
-  patterns: PatternRow[],
+  sourceVideoPath: string,
+  workDir: string,
 ): Promise<Candidate[]> {
   const targetCount = Math.min(
     Math.max(project.max_clips || 6, 1),
@@ -841,85 +955,90 @@ async function findMomentsWithClaude(
           ? "30-60"
           : "30-55";
 
-  const patternText =
-    patterns.length > 0
-      ? patterns
-          .map(
-            (pattern) =>
-              `- ID: ${pattern.id}, Name: "${pattern.name}", Category: "${pattern.category}", Start signal: "${pattern.start_signal}", End signal: "${pattern.end_signal}", Score: ${pattern.score}`,
-          )
-          .join("\n")
-      : "No predefined patterns are available.";
+  try {
+    const [frames, energyWindows] = await Promise.all([
+      extractSampleFrames(
+        sourceVideoPath,
+        duration,
+        workDir,
+      ),
+      extractEnergyCurve(sourceVideoPath, duration),
+    ]);
 
-  const prompt = `
-You are ClipForge AI, an expert video clipping and viral retention specialist.
+    if (frames.length === 0) {
+      throw new Error(
+        "No frames could be extracted from the source video.",
+      );
+    }
 
-Video title:
-"${title}"
+    const energyText = energyWindows
+      .map(
+        (w) =>
+          `t=${w.startSec.toFixed(1)}s: ${w.meanDb.toFixed(1)} dB`,
+      )
+      .join("\n");
 
-Video duration:
-${Math.round(duration)} seconds
+    const promptText = `You are ClipForge AI, an expert short-form video editor for TikTok, YouTube Shorts, and Instagram Reels.
 
-Target clip duration:
-${durationTarget}
+You are given ${frames.length} frames sampled evenly across a ${Math.round(duration)}-second source video (timestamps below the corresponding image), plus a rough audio loudness curve (dB per time window - louder/more energetic moments often mean more engaging delivery, but use your own visual judgment too, not just volume).
 
-Target number of clips:
-${targetCount}
+Frame timestamps (seconds): ${frames.map((f) => f.timeSec.toFixed(1)).join(", ")}
 
-Available viral hook patterns:
-${patternText}
+Audio loudness curve:
+${energyText}
 
-Find the best ${targetCount} moments that could perform well as:
-- YouTube Shorts
-- TikTok
-- Instagram Reels
+Judge purely on what you see and the loudness pattern - you do NOT have a transcript, so do not invent spoken words or quotes.
 
-Important:
-- Timestamps must be inside the source video.
-- start must be >= 0.
-- end must be greater than start.
-- end must be <= ${duration}.
-- Prefer complete thoughts.
-- Prefer strong hooks.
-- Avoid starting in the middle of a sentence.
-- Avoid ending in the middle of a thought.
-- Distribute timestamps throughout the video when possible.
-- Do not invent timestamps outside the video.
-- Return ONLY valid JSON.
+Task: pick the best ${targetCount} moments (as time ranges) for vertical 9:16 clips, each ${durationTarget} seconds long, and for each pick a horizontal crop focal point for reframing widescreen footage to 9:16.
 
+Return ONLY valid JSON, no commentary:
 {
   "clips": [
     {
-      "start": 0,
-      "end": 30,
-      "title": "Short title",
-      "hook": "Strong hook",
-      "topic": "Main topic",
-      "category": "Insight",
-      "patternId": null,
-      "hookScore": 95,
-      "engagementScore": 94,
-      "emotionalScore": 90,
-      "shareabilityScore": 95,
-      "completenessScore": 96
+      "start": 12.0,
+      "end": 45.0,
+      "title": "Punchy short title",
+      "hook": "What likely grabs attention in the first 3s, based on what's visible",
+      "topic": "Main subject, inferred visually",
+      "category": "Insight | Story | How-To | Reaction | Highlight",
+      "cropX": 0.5,
+      "hookScore": 90,
+      "engagementScore": 90,
+      "emotionalScore": 85,
+      "shareabilityScore": 90,
+      "completenessScore": 92
     }
   ]
 }
-`;
 
-  try {
+Rules:
+- start >= 0, end <= ${Math.round(duration)}, end > start.
+- cropX is 0 (subject at left edge) to 1 (subject at right edge), 0.5 = centered. Base it on where the main subject/action sits in the frames within that time range.
+- Spread picks across the video where possible, don't cluster them all in one place.
+- Scores are 0-100 integers, your honest estimate.`;
+
+    const imageContent = frames.map((frame) => ({
+      type: "image_url",
+      image_url: {
+        url: `data:image/jpeg;base64,${frame.base64}`,
+      },
+    }));
+
     const response = await fetch(
-      "https://api.anthropic.com/v1/messages",
+      "https://openrouter.ai/api/v1/chat/completions",
       {
         method: "POST",
-        headers: anthropicHeaders,
+        headers: openRouterHeaders,
         body: JSON.stringify({
-          model: ANTHROPIC_MODEL,
-          max_tokens: 4000,
+          model: OPENROUTER_VISION_MODEL,
+          response_format: { type: "json_object" },
           messages: [
             {
               role: "user",
-              content: prompt,
+              content: [
+                { type: "text", text: promptText },
+                ...imageContent,
+              ],
             },
           ],
         }),
@@ -927,11 +1046,10 @@ Important:
     );
 
     if (!response.ok) {
-      const errorText =
-        await response.text();
+      const errorText = await response.text();
 
       console.warn(
-        `Claude returned ${response.status}: ${errorText}`,
+        `OpenRouter returned ${response.status}: ${errorText}`,
       );
 
       return createFallbackCandidates(
@@ -941,15 +1059,14 @@ Important:
       );
     }
 
-    const json =
-      (await response.json()) as any;
+    const json = (await response.json()) as any;
 
     const text =
-      json.content?.[0]?.text || "";
+      json.choices?.[0]?.message?.content || "";
 
     if (!text) {
       console.warn(
-        "Claude returned empty content.",
+        "OpenRouter returned empty content.",
       );
 
       return createFallbackCandidates(
@@ -959,24 +1076,13 @@ Important:
       );
     }
 
-    const cleanedText =
-      text
-        .replace(
-          /^```json\s*/i,
-          "",
-        )
-        .replace(
-          /^```\s*/i,
-          "",
-        )
-        .replace(
-          /\s*```$/i,
-          "",
-        )
-        .trim();
+    const cleanedText = text
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
 
-    const parsed =
-      JSON.parse(cleanedText);
+    const parsed = JSON.parse(cleanedText);
 
     if (
       !Array.isArray(parsed.clips) ||
@@ -989,134 +1095,86 @@ Important:
       );
     }
 
-    const patternMap =
-      new Map(
-        patterns.map(
-          (pattern) => [
-            pattern.id,
-            pattern,
-          ],
-        ),
-      );
+    const candidates: Candidate[] = parsed.clips
+      .filter((clip: any) => {
+        const start = Number(clip.start);
+        const end = Number(clip.end);
 
-    const candidates =
-      parsed.clips
-        .filter((clip: any) => {
-          const start =
-            Number(clip.start);
+        return (
+          Number.isFinite(start) &&
+          Number.isFinite(end) &&
+          end > start &&
+          start >= 0 &&
+          end <= duration
+        );
+      })
+      .slice(0, targetCount)
+      .map((clip: any) => {
+        const start = Math.max(0, Number(clip.start));
+        const end = Math.min(duration, Number(clip.end));
 
-          const end =
-            Number(clip.end);
-
-          return (
-            Number.isFinite(start) &&
-            Number.isFinite(end) &&
-            end > start &&
-            start >= 0 &&
-            end <= duration
-          );
-        })
-        .slice(0, targetCount)
-        .map((clip: any) => {
-          const start = Math.max(
+        const cropX = Math.min(
+          1,
+          Math.max(
             0,
-            Number(clip.start),
-          );
+            Number.isFinite(Number(clip.cropX))
+              ? Number(clip.cropX)
+              : 0.5,
+          ),
+        );
 
-          const end = Math.min(
-            duration,
-            Number(clip.end),
-          );
+        const hookScore =
+          Number(clip.hookScore) || 90;
+        const engagementScore =
+          Number(clip.engagementScore) || 90;
+        const emotionalScore =
+          Number(clip.emotionalScore) || 85;
+        const shareabilityScore =
+          Number(clip.shareabilityScore) || 90;
+        const completenessScore =
+          Number(clip.completenessScore) || 95;
 
-          const pattern =
-            clip.patternId
-              ? patternMap.get(
-                  String(
-                    clip.patternId,
-                  ),
-                ) ?? null
-              : null;
+        const score =
+          hookScore * 0.35 +
+          engagementScore * 0.35 +
+          shareabilityScore * 0.3;
 
-          const patternScore =
-            pattern?.score ?? 50;
+        return {
+          start,
+          end,
+          title: String(
+            clip.title ||
+              `Viral Moment ${title.slice(0, 30)}`,
+          ),
+          hook: String(
+            clip.hook || "Watch until the end.",
+          ),
+          topic: String(clip.topic || title),
+          category: String(
+            clip.category || "Insight",
+          ),
 
-          const hookScore =
-            Number(clip.hookScore) || 90;
+          cropX,
 
-          const engagementScore =
-            Number(
-              clip.engagementScore,
-            ) || 90;
+          patternId: null,
+          patternName: null,
+          patternScore: 0,
 
-          const emotionalScore =
-            Number(
-              clip.emotionalScore,
-            ) || 85;
-
-          const shareabilityScore =
-            Number(
-              clip.shareabilityScore,
-            ) || 90;
-
-          const completenessScore =
-            Number(
-              clip.completenessScore,
-            ) || 95;
-
-          const score =
-            hookScore * 0.3 +
-            engagementScore * 0.3 +
-            patternScore * 0.2 +
-            shareabilityScore * 0.2;
-
-          return {
-            start,
-            end,
-
-            title: String(
-              clip.title ||
-                `Viral Moment ${title.slice(
-                  0,
-                  30,
-                )}`,
-            ),
-
-            hook: String(
-              clip.hook ||
-                "Watch until the end.",
-            ),
-
-            topic: String(
-              clip.topic || title,
-            ),
-
-            category: String(
-              clip.category ||
-                "Insight",
-            ),
-
-            patternId:
-              pattern?.id ?? null,
-
-            patternName:
-              pattern?.name ?? null,
-
-            patternScore,
-            hookScore,
-            engagementScore,
-            emotionalScore,
-            shareabilityScore,
-            completenessScore,
-            score,
-          };
-        });
+          hookScore,
+          engagementScore,
+          emotionalScore,
+          shareabilityScore,
+          completenessScore,
+          score,
+        };
+      });
 
     if (candidates.length > 0) {
       return candidates;
     }
   } catch (error) {
     console.warn(
-      "Claude candidate generation failed:",
+      "Multimodal candidate generation failed:",
       error instanceof Error
         ? error.message
         : String(error),
@@ -1198,6 +1256,8 @@ function createFallbackCandidates(
       topic: title,
       category: "Highlight",
 
+      cropX: 0.5,
+
       patternId: null,
       patternName: null,
 
@@ -1224,12 +1284,21 @@ async function sliceClipVideo(
   start: number,
   end: number,
   outPath: string,
+  cropX: number = 0.5,
 ): Promise<string> {
   const duration =
     Math.max(
       3,
       end - start,
     );
+
+  // cropX (0-1) is the AI's pick for where the subject sits horizontally.
+  // Clamped in the filter expression too, in case cropX is ever out of range.
+  const safeCropX = Math.min(1, Math.max(0, cropX));
+
+  const cropFilter =
+    `scale=1080:1920:force_original_aspect_ratio=increase,` +
+    `crop=1080:1920:x='min(max(0,(iw-1080)*${safeCropX}),iw-1080)':y='min(max(0,(ih-1920)*0.5),ih-1920)'`;
 
   await execFileAsync(
     "ffmpeg",
@@ -1243,7 +1312,7 @@ async function sliceClipVideo(
       sourcePath,
 
       "-vf",
-      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+      cropFilter,
 
       "-c:v",
       "libx264",
@@ -1264,6 +1333,7 @@ async function sliceClipVideo(
   return outPath;
 }
 
+
 // ============================================================================
 // AUDIO EXTRACTION
 // ============================================================================
@@ -1272,6 +1342,8 @@ async function extractClipAudio(
   clipVideoPath: string,
   outAudioPath: string,
 ): Promise<string> {
+  // LINEAR16/WAV - the most broadly-supported sync encoding for Google STT,
+  // avoids container/codec edge cases that MP3 or AAC can hit.
   await execFileAsync(
     "ffmpeg",
     [
@@ -1283,8 +1355,8 @@ async function extractClipAudio(
       "1",
       "-ar",
       "16000",
-      "-b:a",
-      "64k",
+      "-c:a",
+      "pcm_s16le",
       outAudioPath,
     ],
   );
@@ -1293,121 +1365,35 @@ async function extractClipAudio(
 }
 
 // ============================================================================
-// WHISPER
+// GOOGLE SPEECH-TO-TEXT (runs on the clipped audio only, not the source)
 // ============================================================================
+//
+// Shared with ffmpegWorker.ts (renderer/googleStt.ts) so the automated
+// worker path and the finished-render fallback path can't drift apart.
 
 async function transcribeClippedAudio(
   clipAudioPath: string,
+  clipDurationSec: number,
 ): Promise<{
   words: CaptionWordConfig[];
   text: string;
 }> {
-  try {
-    const form = new FormData();
+  const { words, text } = await transcribeAudioFile(
+    clipAudioPath,
+    clipDurationSec,
+    GOOGLE_STT_API_KEY,
+  );
 
-    const audioBuffer =
-      readFileSync(
-        clipAudioPath,
-      );
-
-    form.append(
-      "file",
-      new Blob(
-        [audioBuffer],
-        {
-          type: "audio/mpeg",
-        },
-      ),
-      "clip.mp3",
-    );
-
-    form.append(
-      "model",
-      "whisper-1",
-    );
-
-    form.append(
-      "response_format",
-      "verbose_json",
-    );
-
-    form.append(
-      "timestamp_granularities[]",
-      "word",
-    );
-
-    form.append(
-      "timestamp_granularities[]",
-      "segment",
-    );
-
-    const response =
-      await fetch(
-        "https://api.openai.com/v1/audio/transcriptions",
-        {
-          method: "POST",
-          headers: openAiHeaders,
-          body: form,
-        },
-      );
-
-    if (!response.ok) {
-      const errorText =
-        await response.text();
-
-      console.warn(
-        `Whisper returned ${response.status}: ${errorText}`,
-      );
-
-      return {
-        words: [],
-        text: "",
-      };
-    }
-
-    const data =
-      (await response.json()) as any;
-
-    const words:
-      CaptionWordConfig[] =
-      (data.words ?? []).map(
-        (word: any) => ({
-          text: String(
-            word.word || "",
-          ).trim(),
-
-          start: Number(
-            Number(
-              word.start,
-            ).toFixed(2),
-          ),
-
-          end: Number(
-            Number(
-              word.end,
-            ).toFixed(2),
-          ),
-        }),
-      );
-
-    return {
-      words,
-      text: data.text || "",
-    };
-  } catch (error) {
-    console.warn(
-      "Whisper failed:",
-      error instanceof Error
-        ? error.message
-        : String(error),
-    );
-
-    return {
-      words: [],
-      text: "",
-    };
-  }
+  return {
+    words: words.map((w) => ({
+      text: w.text,
+      start: w.start,
+      end: w.end,
+    })),
+    text,
+  };
 }
+
 
 // ============================================================================
 // B-ROLL — PEXELS
@@ -1735,42 +1721,15 @@ async function processProject(
       null,
     );
 
-    let patterns: PatternRow[] = [];
-
-    if (project.pattern_set_id) {
-      const {
-        data,
-        error,
-      } = await supabase
-        .from("patterns")
-        .select(
-          "id, name, category, start_signal, end_signal, score, keywords, is_active",
-        )
-        .eq(
-          "pattern_set_id",
-          project.pattern_set_id,
-        )
-        .eq(
-          "is_active",
-          true,
-        );
-
-      if (error) {
-        throw new Error(
-          `Failed to load patterns: ${error.message}`,
-        );
-      }
-
-      patterns =
-        (data ?? []) as PatternRow[];
-    }
-
+    // Pattern-set matching removed - the AI picks moments on its own from
+    // sampled frames + audio energy, not from a user-curated category list.
     const candidates =
-      await findMomentsWithClaude(
+      await findMomentsWithMultimodalAI(
         project,
         project.name,
         meta.duration,
-        patterns,
+        sourceVideoPath,
+        workDir,
       );
 
     console.log(
@@ -1897,16 +1856,17 @@ async function processProject(
         candidate.start,
         candidate.end,
         clipVideoPath,
+        candidate.cropX,
       );
 
       // --------------------------------------------------------------------
-      // C. WHISPER
+      // C. GOOGLE SPEECH-TO-TEXT (on the rendered clip only, not source)
       // --------------------------------------------------------------------
 
       const clipAudioPath =
         path.join(
           workDir,
-          `clip_audio_${clip.id}.mp3`,
+          `clip_audio_${clip.id}.wav`,
         );
 
       await extractClipAudio(
@@ -1915,10 +1875,11 @@ async function processProject(
       );
 
       const {
-        words: whisperWords,
+        words: sttWords,
       } =
         await transcribeClippedAudio(
           clipAudioPath,
+          candidate.end - candidate.start,
         );
 
       // --------------------------------------------------------------------
@@ -2031,7 +1992,7 @@ async function processProject(
             lineSpacing: 1.2,
           },
 
-          words: whisperWords,
+          words: sttWords,
         },
 
         broll: broll

@@ -7,7 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { createClient } from '@supabase/supabase-js'
-import type { ClipConfiguration, BrollConfigItem } from './src/types'
+import type { ClipConfiguration, BrollConfigItem, CaptionWordConfig } from './src/types'
+import { transcribeAudioFile } from './googleStt'
 
 const require = createRequire(import.meta.url)
 const bundledFfmpeg = require('ffmpeg-static') as string | null
@@ -17,6 +18,7 @@ const run = promisify(execFile)
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing required environment variable: ${name}`); return value }
 const SUPABASE_URL = required('SUPABASE_URL')
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY')
+const GOOGLE_STT_API_KEY = required('GOOGLE_STT_API_KEY')
 const FFMPEG = process.env.FFMPEG_PATH?.trim() || bundledFfmpeg || 'ffmpeg'
 const FFPROBE = process.env.FFPROBE_PATH?.trim() || bundledFfprobe?.path || 'ffprobe'
 const YTDLP = process.env.YTDLP_PATH?.trim() || 'yt-dlp'
@@ -75,7 +77,41 @@ async function render(config:ClipConfiguration,sourceFile:string,broll:Array<Bro
 
 async function processJob(job:Job){
   const work=path.join(os.tmpdir(),`clipforge-${job.id}`);await rm(work,{recursive:true,force:true});await mkdir(work,{recursive:true});
-  try{await updateJob(job.id,{status:'RENDERING',stage:'LOADING_SOURCE',progress:2,started_at:new Date().toISOString(),error_message:null});const {data:v,error:ve}=await supabase.from('clip_versions').select('id,version_number,configuration_json').eq('id',job.clip_version_id).single();if(ve||!v)throw new Error(ve?.message||'clip version not found');const version=v as Version;const {data:c,error:ce}=await supabase.from('clips').select('id,project_id').eq('id',job.clip_id).single();if(ce||!c)throw new Error(ce?.message||'clip not found');const {data:p,error:pe}=await supabase.from('projects').select('id,source_type,source_url').eq('id',c.project_id).single();if(pe||!p)throw new Error(pe?.message||'project not found');const config={...version.configuration_json};const sourceFile=await getSource(p.id,p.source_type,p.source_url,work,config.sourceVideo);await updateJob(job.id,{stage:'DOWNLOADING_BROLL',progress:12});const broll=await getBroll(config,work);const music=await optional(config.music?.audioUrl,work,'music.bin');const voice=await optional(config.voiceUrl,work,'voice.bin');await updateJob(job.id,{stage:'FFMPEG_EDITING',progress:20});const out=path.join(work,'finished.mp4');await render(config,sourceFile,broll,music,voice,out);await updateJob(job.id,{stage:'VALIDATING',progress:88});const probe=await run(FFPROBE,['-v','error','-select_streams','v:0','-show_entries','stream=codec_type','-of','csv=p=0',out]);if(probe.stdout.trim()!=='video')throw new Error('FFmpeg produced no video stream');await updateJob(job.id,{stage:'UPLOADING_RENDER',progress:92});const key=`projects/${p.id}/renders/${c.id}-v${version.version_number}.mp4`;const {error:ue}=await supabase.storage.from('renders').upload(key,await readFile(out),{contentType:'video/mp4',upsert:true});if(ue)throw new Error(`Render upload failed: ${ue.message}`);const renderUrl=supabase.storage.from('renders').getPublicUrl(key).data.publicUrl;let thumbUrl:string|null=null;try{const thumb=path.join(work,'thumbnail.jpg');await run(FFMPEG,['-y','-i',out,'-frames:v','1','-q:v','2',thumb]);const tk=`projects/${p.id}/thumbnails/${c.id}-v${version.version_number}.jpg`;const {error:te}=await supabase.storage.from('renders').upload(tk,await readFile(thumb),{contentType:'image/jpeg',upsert:true});if(!te)thumbUrl=supabase.storage.from('renders').getPublicUrl(tk).data.publicUrl}catch(e){console.warn(`[FFmpeg] thumbnail failed: ${e instanceof Error?e.message:String(e)}`)}const {error:vue}=await supabase.from('clip_versions').update({render_url:renderUrl,thumbnail_url:thumbUrl,status:'RENDERED'}).eq('id',version.id);if(vue)throw new Error(`Version update failed: ${vue.message}`);const {error:cue}=await supabase.from('clips').update({current_version_id:version.id,current_render_url:renderUrl,current_thumbnail_url:thumbUrl,status:'RENDERED'}).eq('id',c.id);if(cue)throw new Error(`Clip update failed: ${cue.message}`);await updateJob(job.id,{status:'COMPLETED',stage:'COMPLETED',progress:100,completed_at:new Date().toISOString()});console.log(`[FFmpeg] FINISHED: ${renderUrl}`)}catch(error){const message=error instanceof Error?error.message:String(error);console.error(`[FFmpeg] FAILED: ${message}`);await updateJob(job.id,{status:'FAILED',stage:'FAILED',error_message:message})}finally{await rm(work,{recursive:true,force:true}).catch(()=>undefined)}}
+  try{await updateJob(job.id,{status:'RENDERING',stage:'LOADING_SOURCE',progress:2,started_at:new Date().toISOString(),error_message:null});const {data:v,error:ve}=await supabase.from('clip_versions').select('id,version_number,configuration_json').eq('id',job.clip_version_id).single();if(ve||!v)throw new Error(ve?.message||'clip version not found');const version=v as Version;const {data:c,error:ce}=await supabase.from('clips').select('id,project_id').eq('id',job.clip_id).single();if(ce||!c)throw new Error(ce?.message||'clip not found');const {data:p,error:pe}=await supabase.from('projects').select('id,source_type,source_url').eq('id',c.project_id).single();if(pe||!p)throw new Error(pe?.message||'project not found');const config={...version.configuration_json} as ClipConfiguration;let effectiveConfig=config;const sourceFile=await getSource(p.id,p.source_type,p.source_url,work,config.sourceVideo);await updateJob(job.id,{stage:'DOWNLOADING_BROLL',progress:12});const broll=await getBroll(config,work);const music=await optional(config.music?.audioUrl,work,'music.bin');const voice=await optional(config.voiceUrl,work,'voice.bin');await updateJob(job.id,{stage:'FFMPEG_EDITING',progress:20});const out=path.join(work,'finished.mp4');await render(effectiveConfig,sourceFile,broll,music,voice,out);await updateJob(job.id,{stage:'VALIDATING',progress:88});let probe=await run(FFPROBE,['-v','error','-select_streams','v:0','-show_entries','stream=codec_type','-of','csv=p=0',out]);if(probe.stdout.trim()!=='video')throw new Error('FFmpeg produced no video stream');
+    // Clips created via the browser path (clientProcessor.ts) arrive here with no
+    // caption words yet - the automated Node pipeline (pipeline.ts) already ran
+    // Google STT on an intermediate clip before this job was even created, so it
+    // skips this. This is the "send the finished clip to Google STT" step for the
+    // path that doesn't pre-compute captions: transcribe the render we just made,
+    // then re-render once more with the resulting words burned in.
+    const hasWords = Array.isArray(config.captions?.words) && (config.captions?.words?.length ?? 0) > 0
+    const wantsCaptions = config.captions?.enabled !== false
+    if (!hasWords && wantsCaptions) {
+      await updateJob(job.id,{stage:'TRANSCRIBING',progress:90})
+      try {
+        const sttAudioPath = path.join(work,'stt_audio.wav')
+        await run(FFMPEG,['-y','-i',out,'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',sttAudioPath])
+        const clipStart = Math.max(0,num(config.startTime))
+        const clipDuration = Math.max(0.05,num(config.endTime,clipStart+30)-clipStart)
+        const { words: sttWords } = await transcribeAudioFile(sttAudioPath,clipDuration,GOOGLE_STT_API_KEY)
+        if (sttWords.length > 0) {
+          // sttWords are 0-based within the trimmed clip; shift back to the
+          // source-video timebase since makeFilters subtracts config.startTime.
+          const words: CaptionWordConfig[] = sttWords.map(w => ({ text: w.text, start: w.start + clipStart, end: w.end + clipStart }))
+          effectiveConfig = { ...config, captions: { ...(config.captions || {}), enabled: true, words } }
+          await supabase.from('clip_versions').update({ configuration_json: effectiveConfig }).eq('id', version.id)
+          await updateJob(job.id,{stage:'FFMPEG_EDITING',progress:94})
+          await render(effectiveConfig,sourceFile,broll,music,voice,out)
+          probe = await run(FFPROBE,['-v','error','-select_streams','v:0','-show_entries','stream=codec_type','-of','csv=p=0',out])
+          if (probe.stdout.trim() !== 'video') throw new Error('FFmpeg produced no video stream on caption re-render')
+        } else {
+          console.warn(`[FFmpeg] Google STT returned no words for clip ${c.id}, shipping without captions.`)
+        }
+      } catch (error) {
+        console.warn(`[FFmpeg] Post-render STT failed, shipping clip ${c.id} without captions: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    await updateJob(job.id,{stage:'UPLOADING_RENDER',progress:92});const key=`projects/${p.id}/renders/${c.id}-v${version.version_number}.mp4`;const {error:ue}=await supabase.storage.from('renders').upload(key,await readFile(out),{contentType:'video/mp4',upsert:true});if(ue)throw new Error(`Render upload failed: ${ue.message}`);const renderUrl=supabase.storage.from('renders').getPublicUrl(key).data.publicUrl;let thumbUrl:string|null=null;try{const thumb=path.join(work,'thumbnail.jpg');await run(FFMPEG,['-y','-i',out,'-frames:v','1','-q:v','2',thumb]);const tk=`projects/${p.id}/thumbnails/${c.id}-v${version.version_number}.jpg`;const {error:te}=await supabase.storage.from('renders').upload(tk,await readFile(thumb),{contentType:'image/jpeg',upsert:true});if(!te)thumbUrl=supabase.storage.from('renders').getPublicUrl(tk).data.publicUrl}catch(e){console.warn(`[FFmpeg] thumbnail failed: ${e instanceof Error?e.message:String(e)}`)}const {error:vue}=await supabase.from('clip_versions').update({render_url:renderUrl,thumbnail_url:thumbUrl,status:'RENDERED'}).eq('id',version.id);if(vue)throw new Error(`Version update failed: ${vue.message}`);const {error:cue}=await supabase.from('clips').update({current_version_id:version.id,current_render_url:renderUrl,current_thumbnail_url:thumbUrl,status:'RENDERED'}).eq('id',c.id);if(cue)throw new Error(`Clip update failed: ${cue.message}`);await updateJob(job.id,{status:'COMPLETED',stage:'COMPLETED',progress:100,completed_at:new Date().toISOString()});console.log(`[FFmpeg] FINISHED: ${renderUrl}`)}catch(error){const message=error instanceof Error?error.message:String(error);console.error(`[FFmpeg] FAILED: ${message}`);await updateJob(job.id,{status:'FAILED',stage:'FAILED',error_message:message})}finally{await rm(work,{recursive:true,force:true}).catch(()=>undefined)}}
 
 async function main(){console.log('========================================');console.log('ClipForge FFmpeg worker active.');console.log('Waiting for QUEUED render jobs...');console.log(`FFmpeg: ${FFMPEG}`);console.log(`ffprobe: ${FFPROBE}`);console.log('========================================');await run(FFMPEG,['-version'],{maxBuffer:2*1024*1024});await run(FFPROBE,['-version'],{maxBuffer:2*1024*1024});for(;;){const {data,error}=await supabase.from('render_jobs').select('id,clip_id,clip_version_id').eq('status','QUEUED').order('created_at',{ascending:true}).limit(1);if(error){console.error(`[FFmpeg] Queue error: ${error.message}`);await new Promise(r=>setTimeout(r,3000));continue}const job=data?.[0] as Job|undefined;if(!job){await new Promise(r=>setTimeout(r,3000));continue}const {data:claimed,error:claimError}=await supabase.from('render_jobs').update({status:'CLAIMED'}).eq('id',job.id).eq('status','QUEUED').select('id').maybeSingle();if(claimError||!claimed)continue;await processJob(job)}}
 main().catch(error=>{console.error('[FFmpeg] Worker stopped:',error);process.exit(1)})
