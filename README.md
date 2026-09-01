@@ -48,11 +48,12 @@ npm run dev
 ```bash
 supabase db push                 # applies supabase/migrations
 supabase functions deploy broll-search music-search process-video start-render \
-  oauth-start oauth-callback publish-post sync-analytics
+  oauth-start oauth-callback publish-post sync-analytics google-stt
 supabase secrets set PEXELS_API_KEY=... JAMENDO_CLIENT_ID=... \
   GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... \
   TIKTOK_CLIENT_KEY=... TIKTOK_CLIENT_SECRET=... \
-  YOUTUBE_API_KEY=... APP_URL=https://your-app.example
+  YOUTUBE_API_KEY=... APP_URL=https://your-app.example \
+  GOOGLE_STT_API_KEY=...   # Google Cloud Speech-to-Text (captions; also used by renderer workers)
 ```
 
 Schedule `publish-post` and `sync-analytics` with Supabase cron for automatic

@@ -1,14 +1,24 @@
 /**
  * Audio Slicer & WAV Encoder utility.
  * Slices an exact time range [startTime, startTime + duration] from an audio/video URL
- * in the browser using Web Audio API and encodes to a WAV File suitable for OpenAI Whisper.
+ * in the browser using Web Audio API and encodes to a mono 16kHz 16-bit PCM WAV File
+ * suitable for cloud speech-to-text (Google STT / Whisper-style APIs).
  */
+
+// Cloud STT APIs are trained on (and priced best at) 16kHz mono input, and
+// resampling here keeps the upload payload ~3x smaller than the decode rate.
+const TARGET_SAMPLE_RATE = 16000
+
+export interface SlicedAudio {
+  file: File
+  sampleRate: number
+}
 
 export async function sliceAudioFromUrl(
   mediaUrl: string,
   startTime: number,
   duration: number,
-): Promise<File | null> {
+): Promise<SlicedAudio | null> {
   try {
     if (!mediaUrl || typeof window === 'undefined') return null
 
@@ -32,7 +42,7 @@ export async function sliceAudioFromUrl(
     const endSample = Math.min(decodedBuffer.length, startSample + totalSamples)
     const sliceLength = Math.max(1, endSample - startSample)
 
-    // Create sliced buffer (single channel mono is best for Whisper and lightweight)
+    // Create sliced buffer (single channel mono is best for STT and lightweight)
     const monoBuffer = audioCtx.createBuffer(1, sliceLength, sampleRate)
     const channelData = monoBuffer.getChannelData(0)
 
@@ -51,13 +61,39 @@ export async function sliceAudioFromUrl(
       }
     }
 
+    // Resample to 16kHz so the WAV matches the STT request config exactly.
+    let outputBuffer = monoBuffer
+    let outputSampleRate = sampleRate
+    try {
+      if (sampleRate !== TARGET_SAMPLE_RATE) {
+        const OfflineCtxClass = window.OfflineAudioContext || (window as unknown as { webkitOfflineAudioContext: typeof OfflineAudioContext }).webkitOfflineAudioContext
+        if (OfflineCtxClass) {
+          const resampledLength = Math.max(1, Math.ceil(sliceLength * TARGET_SAMPLE_RATE / sampleRate))
+          const offlineCtx = new OfflineCtxClass(1, resampledLength, TARGET_SAMPLE_RATE)
+          const source = offlineCtx.createBufferSource()
+          source.buffer = monoBuffer
+          source.connect(offlineCtx.destination)
+          source.start()
+          outputBuffer = await offlineCtx.startRendering()
+          outputSampleRate = outputBuffer.sampleRate
+        }
+      }
+    } catch (resampleErr) {
+      console.warn('Audio resample to 16kHz failed, sending at decode rate:', resampleErr)
+      outputBuffer = monoBuffer
+      outputSampleRate = sampleRate
+    }
+
     await audioCtx.close()
 
     // 2. Encode to 16-bit PCM WAV Blob
-    const wavBlob = audioBufferToWav(monoBuffer)
-    return new File([wavBlob], `clip-slice-${Math.round(startTime)}-${Math.round(duration)}s.wav`, {
-      type: 'audio/wav',
-    })
+    const wavBlob = audioBufferToWav(outputBuffer)
+    return {
+      file: new File([wavBlob], `clip-slice-${Math.round(startTime)}-${Math.round(duration)}s.wav`, {
+        type: 'audio/wav',
+      }),
+      sampleRate: outputSampleRate,
+    }
   } catch (err) {
     console.warn('Audio slicing via Web Audio failed, fallback will be used:', err)
     return null

@@ -1,5 +1,6 @@
 import type { Clip, CaptionWordConfig, BrollConfigItem } from './types'
 import { sliceAudioFromUrl } from './audioSlicer'
+import { invokeFunction, isSupabaseConfigured } from './supabase'
 
 // Curated list of high-converting creator fonts for TikTok, Reels, and Shorts
 export interface CreatorFontOption {
@@ -100,21 +101,37 @@ export const STOCK_BROLL_CATALOG: StockVideoAsset[] = [
   },
 ]
 
-const USER_NVIDIA_KEY = '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'
-
+// No provider keys are hardcoded here. Caption transcription runs server-side
+// through the google-stt edge function; this stored key is only a user-supplied
+// OpenRouter/OpenAI key (set via Settings) used by the AI chat fallbacks.
 export const getStoredApiKey = (): string => {
   try {
     const saved = localStorage.getItem('clipforge_openai_key')
-    if (saved && saved.trim()) return saved.trim()
-    localStorage.setItem('clipforge_openai_key', USER_NVIDIA_KEY)
-    return USER_NVIDIA_KEY
+    return saved && saved.trim() ? saved.trim() : ''
   } catch {
-    return USER_NVIDIA_KEY
+    return ''
   }
 }
 
 const getFallbackAiKey = () => {
   return getStoredApiKey()
+}
+
+/**
+ * Reads a Blob/File as base64 (without the data URL prefix) so audio slices
+ * can be shipped to the google-stt edge function as JSON.
+ */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '')
+      const commaIndex = dataUrl.indexOf(',')
+      resolve(commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : '')
+    }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read audio file'))
+    reader.readAsDataURL(file)
+  })
 }
 
 /**
@@ -203,8 +220,9 @@ export function realignWordsEvenly(words: CaptionWordConfig[], clipDuration: num
 
 /**
  * Generate synchronized word-level captions for a clip interval.
- * Supports OpenAI Whisper verbose_json API with direct audio slicing, NVIDIA NIM Whisper API,
- * transcript segment alignment, or AI Semantic Speech Timing Engine.
+ * Transcribes the sliced audio with Google Cloud Speech-to-Text (via the
+ * google-stt edge function), falls back to transcript segment alignment or the
+ * AI Semantic Speech Timing Engine when transcription is unavailable.
  */
 export async function generateWhisperCaptions({
   clip,
@@ -229,71 +247,49 @@ export async function generateWhisperCaptions({
   const clipEnd = typeof endTime === 'number' ? endTime : (clip.end_time || clipStart + 30)
   const clipDuration = Math.max(2, clipEnd - clipStart)
 
-  const apiKey =
-    customApiKey?.trim() ||
-    getStoredApiKey() ||
-    (typeof import.meta !== 'undefined' &&
-      (import.meta.env?.VITE_OPENAI_API_KEY || import.meta.env?.VITE_OPENROUTER_API_KEY)) ||
-    USER_NVIDIA_KEY
+  const apiKey = customApiKey?.trim() || getStoredApiKey()
 
   // 1. If no pre-sliced audio file was provided, try slicing the exact time slice from the Remotion source video
   let audioFileToTranscribe = whisperAudioFile
+  let sampleRateHertz = 16000
   if (!audioFileToTranscribe && sourceMediaUrl && (sourceMediaUrl.startsWith('http') || sourceMediaUrl.startsWith('blob:'))) {
     try {
-      const slicedFile = await sliceAudioFromUrl(sourceMediaUrl, clipStart, clipDuration)
-      if (slicedFile) {
-        audioFileToTranscribe = slicedFile
+      const sliced = await sliceAudioFromUrl(sourceMediaUrl, clipStart, clipDuration)
+      if (sliced) {
+        audioFileToTranscribe = sliced.file
+        sampleRateHertz = sliced.sampleRate
       }
     } catch (e) {
       console.warn('Could not slice audio from source URL:', e)
     }
   }
 
-  // 2. If an audio file slice is available, call official OpenAI or NVIDIA NIM Whisper endpoint
-  if (audioFileToTranscribe) {
+  // 2. Transcribe the sliced audio with Google Cloud Speech-to-Text via the google-stt
+  // edge function (speech.googleapis.com has no CORS and must only be called server-side).
+  if (audioFileToTranscribe && isSupabaseConfigured) {
     try {
-      const isNvidia = apiKey.startsWith('nvapi-');
-      const isOpenRouter = apiKey.startsWith('sk-or-');
-      let endpoint;
-      let model;
-      if (isNvidia) {
-        endpoint = 'https://integrate.api.nvidia.com/v1/audio/transcriptions';
-        model = 'openai/whisper-large-v3-turbo';
-      } else if (isOpenRouter) {
-        endpoint = 'https://openrouter.ai/api/v1/audio/transcriptions';
-        model = 'openai/whisper-1';
-      } else {
-        endpoint = 'https://api.openai.com/v1/audio/transcriptions';
-        model = 'whisper-1';
-      }
-
-      const formData = new FormData()
-      formData.append('file', audioFileToTranscribe)
-      formData.append('model', model)
-      formData.append('response_format', 'verbose_json')
-      formData.append('timestamp_granularities[]', 'word')
-      if (language) formData.append('language', language)
-
-      const whisperRes = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: formData,
+      const audioBase64 = await fileToBase64(audioFileToTranscribe)
+      const result = await invokeFunction<{
+        words: Array<{ text: string; start: number; end: number }>
+        text: string
+      }>('google-stt', {
+        audioBase64,
+        durationSec: clipDuration,
+        sampleRateHertz,
+        languageCode: language && language !== 'en' ? language : 'en-US',
       })
 
-      if (whisperRes.ok) {
-        const whisperData = await whisperRes.json()
-        if (Array.isArray(whisperData.words) && whisperData.words.length > 0) {
-          return whisperData.words.map((w: { word: string; start: number; end: number }) => ({
-            text: w.word.trim(),
-            start: Number(w.start.toFixed(2)),
-            end: Number(w.end.toFixed(2)),
+      if (Array.isArray(result.words) && result.words.length > 0) {
+        return result.words
+          .filter((w) => String(w.text || '').trim().length > 0)
+          .map((w) => ({
+            text: String(w.text).trim(),
+            start: Number(Number(w.start).toFixed(2)),
+            end: Number(Number(w.end).toFixed(2)),
           }))
-        }
       }
-    } catch (whisperErr) {
-      console.warn('Whisper direct file audio transcription error, falling back to AI timing:', whisperErr)
+    } catch (sttErr) {
+      console.warn('Google STT transcription error, falling back to transcript alignment / AI timing:', sttErr)
     }
   }
 
@@ -347,6 +343,7 @@ Example JSON output:
 }`
 
   try {
+    if (!apiKey) throw new Error('No AI key configured for semantic caption timing.')
     const endpoint = 'https://openrouter.ai/api/v1/chat/completions'
 const modelName = 'anthropic/claude-opus-5'
 
