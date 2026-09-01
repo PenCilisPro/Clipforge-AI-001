@@ -15,9 +15,16 @@ const require = createRequire(import.meta.url)
 // (verified: 0 hits in `ffmpeg -filters`, despite its own version banner
 // claiming --enable-libfreetype/--enable-fontconfig support) — every
 // caption-burning render was failing with "No such filter: 'drawtext'".
-// @ffmpeg-installer/ffmpeg is an older build (~2018) but does have it, and
-// nothing else this worker does (scale/crop/overlay/drawtext/libx264/aac)
-// needs anything newer.
+// @ffmpeg-installer/ffmpeg does have drawtext, but it's an ~2018 build —
+// verified to silently die mid-encode (no ffmpeg-emitted error) on the
+// large chained-drawtext filter graphs this worker builds for word-by-word
+// captions. scripts/install-ffmpeg.mjs downloads a current static build
+// into ./bin at install time; prefer that when present, and only fall
+// back to the old bundled binary if that download failed for some reason
+// (offline build, upstream unreachable, tar/xz missing).
+const BIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'bin')
+const downloadedFfmpeg = path.join(BIN_DIR, 'ffmpeg')
+const downloadedFfprobe = path.join(BIN_DIR, 'ffprobe')
 const bundledFfmpeg = require('@ffmpeg-installer/ffmpeg').path as string | null
 const bundledFfprobe = require('ffprobe-static') as { path?: string }
 
@@ -42,8 +49,8 @@ const run = promisify(execFile)
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`Missing required environment variable: ${name}`); return value }
 const SUPABASE_URL = required('SUPABASE_URL')
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY')
-const FFMPEG = process.env.FFMPEG_PATH?.trim() || bundledFfmpeg || 'ffmpeg'
-const FFPROBE = process.env.FFPROBE_PATH?.trim() || bundledFfprobe?.path || 'ffprobe'
+const FFMPEG = process.env.FFMPEG_PATH?.trim() || (existsSync(downloadedFfmpeg) ? downloadedFfmpeg : null) || bundledFfmpeg || 'ffmpeg'
+const FFPROBE = process.env.FFPROBE_PATH?.trim() || (existsSync(downloadedFfprobe) ? downloadedFfprobe : null) || bundledFfprobe?.path || 'ffprobe'
 const YTDLP = process.env.YTDLP_PATH?.trim() || 'yt-dlp'
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } })
 
