@@ -2,11 +2,16 @@
 //
 // Pipeline:
 // 1. Claim QUEUED project
-// 2. Download source video
-// 3. Probe source
-// 4. Analyze video with Claude
-// 5. Create clip records
-// 6. Prepare clip source + Whisper captions + B-roll + music
+// 2. Download the full source video (YouTube or uploaded file)
+// 3. Probe source, extract full audio, transcribe the WHOLE video with
+//    Google Cloud Speech-to-Text, and save that transcript (used for the
+//    "View Transcript" UI)
+// 4. Send the transcript to Claude (via OpenRouter) so it picks the best
+//    moments based on actual content, not just the title
+// 5. Create clip records for each candidate moment
+// 6. Slice each clip with ffmpeg, transcribe the clipped audio with
+//    Google Cloud Speech-to-Text for burned-in captions, and find B-roll +
+//    music
 // 7. Create clip_versions as QUEUED
 // 8. Create render_jobs as QUEUED
 // 9. Wait for Remotion worker
@@ -18,6 +23,7 @@
 
 import { execFile } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -27,11 +33,13 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { createClient } from "@supabase/supabase-js";
 
 import type {
   BrollConfigItem,
+  CaptionWordConfig,
   ClipConfiguration,
   MusicConfig,
 } from "./src/types";
@@ -56,8 +64,18 @@ const SUPABASE_URL = requireEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv(
   "SUPABASE_SERVICE_ROLE_KEY",
 );
-const MOONSHOT_API_KEY = requireEnv("MOONSHOT_API_KEY");
-const RAPIDAPI_KEY = requireEnv("RAPIDAPI_KEY");
+// Google Cloud Speech-to-Text handles transcription (full-video + per-clip
+// captions) instead of OpenAI Whisper — no OpenAI key required. This is a
+// plain Google API key (AIzaSy...) with the Speech-to-Text API enabled on
+// its GCP project, not a Google AI Studio/Gemini key.
+const GOOGLE_CLOUD_API_KEY = requireEnv("GOOGLE_CLOUD_API_KEY");
+// Claude is called through OpenRouter rather than api.anthropic.com
+// directly, using an OpenRouter key.
+const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
+// YouTube downloading uses yt-dlp as the primary method (free, no
+// subscription). RapidAPI is optional and only used as a fallback if
+// yt-dlp fails and a key happens to be configured.
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || null;
 const PEXELS_API_KEY = requireEnv("PEXELS_API_KEY");
 const JAMENDO_CLIENT_ID = requireEnv("JAMENDO_CLIENT_ID");
 
@@ -65,23 +83,35 @@ const RAPIDAPI_HOST =
   process.env.RAPIDAPI_HOST ||
   "youtube-media-downloader.p.rapidapi.com";
 
-// Official Moonshot AI (Kimi) API, not a third-party router. kimi-k3 is the
-// current vision-capable flagship as of writing - the moonshot-v1-* family
-// is being sunset, don't default back to those. Overridable regardless.
-const KIMI_VISION_MODEL =
-  process.env.KIMI_VISION_MODEL || "kimi-k3";
+// Path to the yt-dlp binary. Defaults to the one downloaded into
+// renderer/bin/ by scripts/install-yt-dlp.mjs during `npm install`; can be
+// overridden (e.g. to a system-wide install) with YTDLP_PATH.
+const YTDLP_PATH =
+  process.env.YTDLP_PATH ||
+  path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "bin",
+    "yt-dlp",
+  );
+
+// OpenRouter model slug for moment detection. Override with the
+// ANTHROPIC_MODEL env var if this default ever falls out of date.
+const ANTHROPIC_MODEL =
+  process.env.ANTHROPIC_MODEL || "anthropic/claude-sonnet-5";
 
 // ============================================================================
 // API HEADERS
 // ============================================================================
 
-const moonshotHeaders: Record<string, string> = {
-  Authorization: `Bearer ${MOONSHOT_API_KEY}`,
+const openRouterHeaders: Record<string, string> = {
+  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
   "Content-Type": "application/json",
+  "HTTP-Referer": "https://clipforge.app",
+  "X-Title": "ClipForge AI",
 };
 
 const rapidApiHeaders: Record<string, string> = {
-  "x-rapidapi-key": RAPIDAPI_KEY,
+  "x-rapidapi-key": RAPIDAPI_KEY || "",
   "x-rapidapi-host": RAPIDAPI_HOST,
 };
 
@@ -149,6 +179,17 @@ interface VideoRow {
   youtube_video_id: string | null;
 }
 
+interface PatternRow {
+  id: string;
+  name: string;
+  category: string;
+  start_signal: string;
+  end_signal: string;
+  score: number;
+  keywords: string[];
+  is_active: boolean;
+}
+
 interface Candidate {
   start: number;
   end: number;
@@ -157,15 +198,10 @@ interface Candidate {
   topic: string;
   category: string;
 
-  // Horizontal focal point for the 9:16 crop, 0 (left) - 1 (right), 0.5 = center.
-  cropX: number;
-
-  // Pattern matching removed - AI picks moments solely on its own judgment.
-  // Fields kept only because the `clips` table still has these columns.
   patternId: string | null;
   patternName: string | null;
-  patternScore: number;
 
+  patternScore: number;
   hookScore: number;
   engagementScore: number;
   emotionalScore: number;
@@ -423,10 +459,144 @@ async function syncProjectRenderProgress(
 // YOUTUBE DOWNLOAD
 // ============================================================================
 
+// Primary downloader — free, no subscription/quota. Uses the yt-dlp binary
+// installed at build time by scripts/install-yt-dlp.mjs (see YTDLP_PATH).
+//
+// YouTube's default (web) client aggressively bot-checks requests from
+// datacenter IPs, which is exactly what a Railway container is — this
+// shows up as "Sign in to confirm you're not a bot". Two mitigations:
+//
+// 1. player_client=android: the Android client uses a different auth flow
+//    that isn't subject to the same web bot-check, and needs no JS runtime
+//    for signature decryption. Free, no setup, tried first automatically.
+// 2. Optional cookies from a real logged-in YouTube session, via the
+//    YTDLP_COOKIES env var (paste the full contents of a Netscape-format
+//    cookies.txt export). This is the standard fallback if (1) still gets
+//    blocked on some videos. Cookies do expire/rot over time and need
+//    periodic re-export — there's no fully "set and forget" way to make
+//    cloud-IP YouTube downloading 100% reliable.
+async function downloadViaYtDlp(
+  youtubeUrl: string,
+  outPath: string,
+): Promise<boolean> {
+  if (!existsSync(YTDLP_PATH)) {
+    console.warn(
+      `yt-dlp binary not found at ${YTDLP_PATH} — skipping yt-dlp download.`,
+    );
+
+    return false;
+  }
+
+  console.log(
+    `Attempting YouTube download via yt-dlp (${YTDLP_PATH})...`,
+  );
+
+  let cookiesPath: string | null = null;
+
+  if (process.env.YTDLP_COOKIES) {
+    try {
+      cookiesPath = path.join(
+        path.dirname(outPath),
+        "cookies.txt",
+      );
+
+      writeFileSync(cookiesPath, process.env.YTDLP_COOKIES);
+    } catch (error) {
+      console.warn(
+        "Failed to write YTDLP_COOKIES to a temp file, continuing without cookies:",
+        error instanceof Error ? error.message : String(error),
+      );
+
+      cookiesPath = null;
+    }
+  }
+
+  const baseArgs = [
+    "--no-playlist",
+    "--no-part",
+    "--no-mtime",
+    "--merge-output-format",
+    "mp4",
+    "-f",
+    "bv*+ba/b",
+    "-o",
+    outPath,
+  ];
+
+  if (cookiesPath) {
+    baseArgs.push("--cookies", cookiesPath);
+  }
+
+  try {
+    try {
+      // Attempt 1: Android client — usually sidesteps the web bot-check
+      // entirely, no cookies required.
+      await execFileAsync(
+        YTDLP_PATH,
+        [
+          ...baseArgs,
+          "--extractor-args",
+          "youtube:player_client=android",
+          youtubeUrl,
+        ],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
+    } catch (androidError) {
+      console.warn(
+        "yt-dlp (android client) failed, retrying with default client:",
+        androidError instanceof Error
+          ? androidError.message
+          : String(androidError),
+      );
+
+      // Attempt 2: default (web) client, with cookies if we have them.
+      await execFileAsync(
+        YTDLP_PATH,
+        [...baseArgs, youtubeUrl],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
+    }
+
+    if (!existsSync(outPath)) {
+      console.warn("yt-dlp finished but produced no output file.");
+      return false;
+
+    }
+
+    const stats = statSync(outPath);
+
+    if (stats.size <= 0) {
+      console.warn("yt-dlp produced an empty file.");
+      return false;
+    }
+
+    console.log(
+      `Downloaded ${Math.round(stats.size / 1024 / 1024)} MB via yt-dlp.`,
+    );
+
+    return true;
+  } catch (error) {
+    console.warn(
+      "yt-dlp download failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+
+    return false;
+  }
+}
+
 async function downloadViaRapidApi(
   youtubeUrl: string,
   outPath: string,
 ): Promise<boolean> {
+  if (!RAPIDAPI_KEY) {
+    console.warn(
+      "RAPIDAPI_KEY not configured — skipping RapidAPI fallback.",
+    );
+
+    return false;
+  }
+
   console.log(
     `Attempting YouTube download via RapidAPI (${RAPIDAPI_HOST})...`,
   );
@@ -617,15 +787,25 @@ async function downloadSource(
       `YouTube video ID: ${videoId}`,
     );
 
-    const success =
-      await downloadViaRapidApi(
+    // yt-dlp first (free, no subscription). RapidAPI is only used as a
+    // fallback, and only if RAPIDAPI_KEY happens to be configured.
+    let success =
+      await downloadViaYtDlp(
         project.source_url,
         outPath,
       );
 
     if (!success) {
+      success =
+        await downloadViaRapidApi(
+          project.source_url,
+          outPath,
+        );
+    }
+
+    if (!success) {
       throw new Error(
-        "RapidAPI YouTube download failed.",
+        "YouTube download failed via both yt-dlp and RapidAPI.",
       );
     }
 
@@ -807,255 +987,465 @@ async function probeVideo(
   };
 }
 
-
 // ============================================================================
-// MULTIMODAL MOMENT DETECTION (frames + audio energy, no transcript)
+// FULL-VIDEO AUDIO EXTRACTION
 // ============================================================================
-//
-// Picks clip-worthy moments AND a 9:16 crop focal point by actually looking
-// at sampled frames and a rough loudness curve from the source video - not
-// by asking an LLM to guess from the title (that was the old behavior).
-// No pattern list, no user-supplied categories - AI decides on its own.
 
-const MOMENT_FRAME_COUNT = 10;
-const ENERGY_WINDOW_COUNT = 24;
-
-interface EnergyWindow {
-  startSec: number;
-  meanDb: number;
-}
-
-async function extractSampleFrames(
-  sourcePath: string,
-  duration: number,
-  workDir: string,
-): Promise<{ timeSec: number; base64: string }[]> {
-  const frames: { timeSec: number; base64: string }[] = [];
-
-  for (let i = 0; i < MOMENT_FRAME_COUNT; i++) {
-    // Skip the very first/last instants - often black frames or logos.
-    const fraction = (i + 0.5) / MOMENT_FRAME_COUNT;
-    const timeSec = Math.min(
-      Math.max(0, duration * fraction),
-      Math.max(0, duration - 0.2),
-    );
-
-    const framePath = path.join(
-      workDir,
-      `moment_frame_${i}.jpg`,
-    );
-
-    try {
-      await execFileAsync(
-        "ffmpeg",
-        [
-          "-y",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-threads",
-          "2",
-          "-ss",
-          String(timeSec),
-          "-i",
-          sourcePath,
-          "-frames:v",
-          "1",
-          "-q:v",
-          "4",
-          "-vf",
-          "scale=480:-2",
-          framePath,
-        ],
-        { maxBuffer: 20 * 1024 * 1024 },
-      );
-
-      const base64 = readFileSync(framePath).toString(
-        "base64",
-      );
-
-      frames.push({ timeSec, base64 });
-    } catch (error) {
-      console.warn(
-        `Frame extraction failed at ${timeSec}s:`,
-        error instanceof Error
-          ? error.message
-          : String(error),
-      );
-    }
-  }
-
-  return frames;
-}
-
-async function extractEnergyCurve(
-  sourcePath: string,
-  duration: number,
-): Promise<EnergyWindow[]> {
-  const windowCount = Math.min(
-    ENERGY_WINDOW_COUNT,
-    Math.max(1, Math.floor(duration / 3)),
+async function extractFullAudio(
+  sourceVideoPath: string,
+  outAudioPath: string,
+): Promise<string> {
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+      "-i",
+      sourceVideoPath,
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      // Low bitrate on purpose: Speech-to-Text's inline request has a hard
+      // 10MB payload ceiling, and base64 inflates raw bytes by ~33%. At
+      // 64k this video (18min) alone produced an 8.5MB file that became
+      // an 11.3MB base64 payload and got rejected by the API — 32k roughly
+      // doubles the video length we can fit before hitting that ceiling,
+      // and is still plenty intelligible for ASR.
+      "-b:a",
+      "32k",
+      outAudioPath,
+    ],
+    { maxBuffer: 20 * 1024 * 1024 },
   );
 
-  const windowLength = duration / windowCount;
-  const windows: EnergyWindow[] = [];
+  return outAudioPath;
+}
 
-  for (let i = 0; i < windowCount; i++) {
-    const startSec = i * windowLength;
+// ============================================================================
+// GOOGLE CLOUD SPEECH-TO-TEXT (replaces Gemini / OpenAI Whisper)
+// ============================================================================
+//
+// Unlike Gemini, Speech-to-Text is a dedicated ASR service and gives real
+// per-word timestamps (enableWordTimeOffsets), so captions no longer need
+// the character-length approximation the Gemini path required.
+//
+// Uses speech:longrunningrecognize (works for any audio length) with audio
+// sent inline as base64. Inline requests are capped around 10MB by the
+// API, so very long source videos may still exceed that — same tradeoff
+// as before, just a different ceiling.
 
-    try {
-      const { stderr } = await execFileAsync(
-        "ffmpeg",
-        [
-          "-y",
-          "-hide_banner",
-          "-threads",
-          "2",
-          "-ss",
-          String(startSec),
-          "-t",
-          String(windowLength),
-          "-i",
-          sourcePath,
-          "-af",
-          "volumedetect",
-          "-vn",
-          "-f",
-          "null",
-          "-",
-        ],
-        { maxBuffer: 20 * 1024 * 1024 },
+interface FullTranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+interface SpeechWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
+// Google's inline request payload limit is 10,485,760 bytes (10MB) TOTAL,
+// and base64 inflates raw bytes by ~4/3. This cap is on the RAW audio
+// file, sized so the base64 encoding + JSON wrapper stays safely under
+// that limit (10MB * 3/4 ≈ 7.86MB theoretical max — capped lower for
+// margin). At the 32k mono bitrate extractFullAudio now uses, this is
+// good for roughly 29 minutes of audio.
+const SPEECH_MAX_AUDIO_BYTES = 7 * 1024 * 1024;
+
+function parseGoogleDuration(value: string | undefined): number {
+  if (!value) return 0;
+  // Google returns durations like "1.200s"
+  return Number(String(value).replace("s", "")) || 0;
+}
+
+async function callSpeechToText(
+  audioPath: string,
+): Promise<SpeechWord[] | null> {
+  try {
+    const stats = statSync(audioPath);
+
+    if (stats.size > SPEECH_MAX_AUDIO_BYTES) {
+      console.warn(
+        `Audio is ${Math.round(
+          stats.size / 1024 / 1024,
+        )}MB, over the Speech-to-Text inline upload limit — skipping transcription.`,
       );
 
-      const match = stderr.match(
-        /mean_volume:\s*(-?\d+(\.\d+)?)\s*dB/,
+      return null;
+    }
+
+    const base64Audio = readFileSync(audioPath).toString("base64");
+
+    const startResponse = await fetch(
+      `https://speech.googleapis.com/v1/speech:longrunningrecognize?key=${GOOGLE_CLOUD_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            encoding: "MP3",
+            sampleRateHertz: 16000,
+            languageCode: "en-US",
+            enableWordTimeOffsets: true,
+            enableAutomaticPunctuation: true,
+            model: "latest_long",
+          },
+          audio: { content: base64Audio },
+        }),
+      },
+    );
+
+    if (!startResponse.ok) {
+      const errorText = await startResponse.text();
+
+      console.warn(
+        `Speech-to-Text returned ${startResponse.status}: ${errorText}`,
       );
 
-      const meanDb = match
-        ? parseFloat(match[1])
-        : -100;
+      return null;
+    }
 
-      windows.push({ startSec, meanDb });
-    } catch (error) {
-      // A window failing (e.g. silence-only) shouldn't abort the whole scan.
-      windows.push({ startSec, meanDb: -100 });
+    const startData = (await startResponse.json()) as any;
+    const operationName = startData.name;
+
+    if (!operationName) {
+      console.warn(
+        "Speech-to-Text did not return an operation name.",
+      );
+
+      return null;
+    }
+
+    // Poll the long-running operation until done (or we give up).
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_POLLS = 100; // ~5 minutes
+
+    let operationData: any = null;
+
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, POLL_INTERVAL_MS),
+      );
+
+      const pollResponse = await fetch(
+        `https://speech.googleapis.com/v1/operations/${operationName}?key=${GOOGLE_CLOUD_API_KEY}`,
+      );
+
+      if (!pollResponse.ok) continue;
+
+      const polled = (await pollResponse.json()) as any;
+
+      if (polled.done) {
+        operationData = polled;
+        break;
+      }
+    }
+
+    if (!operationData) {
+      console.warn(
+        "Speech-to-Text operation did not complete in time.",
+      );
+
+      return null;
+    }
+
+    if (operationData.error) {
+      console.warn(
+        `Speech-to-Text operation failed: ${JSON.stringify(
+          operationData.error,
+        )}`,
+      );
+
+      return null;
+    }
+
+    const results = operationData.response?.results || [];
+
+    const words: SpeechWord[] = [];
+
+    for (const result of results) {
+      const alt = result.alternatives?.[0];
+      if (!alt?.words) continue;
+
+      for (const w of alt.words) {
+        words.push({
+          text: String(w.word || "").trim(),
+          start: Number(
+            parseGoogleDuration(w.startTime).toFixed(2),
+          ),
+          end: Number(
+            parseGoogleDuration(w.endTime).toFixed(2),
+          ),
+        });
+      }
+    }
+
+    return words;
+  } catch (error) {
+    console.warn(
+      "Speech-to-Text transcription failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+
+    return null;
+  }
+}
+
+// Groups a flat word list into sentence-like segments (splits after
+// sentence-ending punctuation, or after a long pause between words) for
+// the "View Transcript" UI and for Claude's moment-selection prompt.
+function wordsToSegments(
+  words: SpeechWord[],
+): FullTranscriptSegment[] {
+  const segments: FullTranscriptSegment[] = [];
+
+  let current: SpeechWord[] = [];
+
+  const flush = () => {
+    if (current.length === 0) return;
+
+    segments.push({
+      start: current[0].start,
+      end: current[current.length - 1].end,
+      text: current.map((w) => w.text).join(" "),
+    });
+
+    current = [];
+  };
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    current.push(word);
+
+    const endsSentence = /[.!?]$/.test(word.text);
+    const nextWord = words[i + 1];
+    const longPause =
+      nextWord && nextWord.start - word.end > 1.5;
+
+    if (endsSentence || longPause) {
+      flush();
     }
   }
 
-  return windows;
+  flush();
+
+  return segments;
 }
 
-async function findMomentsWithMultimodalAI(
+// ----------------------------------------------------------------------
+// Full-video transcript
+// ----------------------------------------------------------------------
+//
+// Transcribes the ENTIRE source video (not an individual clip) so that
+// Claude can pick moments based on what is actually said, instead of only
+// the project title. It also gives us a real transcript to store for the
+// "View Transcript" UI.
+
+async function transcribeFullVideo(
+  fullAudioPath: string,
+): Promise<{
+  segments: FullTranscriptSegment[];
+  fullText: string;
+} | null> {
+  const words = await callSpeechToText(fullAudioPath);
+
+  if (!words || words.length === 0) return null;
+
+  const segments = wordsToSegments(words);
+
+  return {
+    segments,
+    fullText: words.map((w) => w.text).join(" "),
+  };
+}
+
+async function saveFullTranscript(
+  projectId: string,
+  transcript: {
+    segments: FullTranscriptSegment[];
+    fullText: string;
+  } | null,
+): Promise<void> {
+  if (!transcript) return;
+
+  // Clear any transcript from a previous run of this project before
+  // inserting the fresh one (there's no unique constraint on project_id to
+  // upsert against).
+  await supabase
+    .from("transcripts")
+    .delete()
+    .eq("project_id", projectId);
+
+  const { error } = await supabase.from("transcripts").insert({
+    project_id: projectId,
+    language: "en",
+    full_text: transcript.fullText,
+    segments: transcript.segments,
+  });
+
+  if (error) {
+    console.warn(
+      `Failed to save full transcript: ${error.message}`,
+    );
+  }
+}
+
+// ============================================================================
+// CLAUDE CANDIDATE DETECTION
+// ============================================================================
+
+async function findMomentsWithClaude(
   project: ProjectRow,
   title: string,
   duration: number,
-  sourceVideoPath: string,
-  workDir: string,
+  patterns: PatternRow[],
+  transcript: {
+    segments: FullTranscriptSegment[];
+    fullText: string;
+  } | null,
 ): Promise<Candidate[]> {
+  // Matches the frontend's "Number of Clips" input range (1-30) — this
+  // used to silently cap at 8 regardless of what was selected.
   const targetCount = Math.min(
     Math.max(project.max_clips || 6, 1),
-    8,
+    30,
   );
 
-  // 'ai' preset = no user-picked bound, AI decides freely within a sane range.
-  // Every other preset is a hard guarantee, not just a prompt hint - clamped
-  // below regardless of what the model actually returns.
-  const durationBounds: [number, number] =
+  const durationTarget =
     project.clip_duration_preset === "15-30"
-      ? [15, 30]
+      ? "20-30"
       : project.clip_duration_preset === "60-90"
-        ? [60, 90]
-        : project.clip_duration_preset === "30-60"
-          ? [30, 60]
-          : [20, 60];
+        ? "60-90"
+        : project.clip_duration_preset === "ai"
+          ? "30-60"
+          : "30-55";
 
-  const durationTarget = `${durationBounds[0]}-${durationBounds[1]}`;
+  const patternText =
+    patterns.length > 0
+      ? patterns
+          .map(
+            (pattern) =>
+              `- ID: ${pattern.id}, Name: "${pattern.name}", Category: "${pattern.category}", Start signal: "${pattern.start_signal}", End signal: "${pattern.end_signal}", Score: ${pattern.score}`,
+          )
+          .join("\n")
+      : "No predefined patterns are available.";
 
-  try {
-    const [frames, energyWindows] = await Promise.all([
-      extractSampleFrames(
-        sourceVideoPath,
-        duration,
-        workDir,
-      ),
-      extractEnergyCurve(sourceVideoPath, duration),
-    ]);
+  // Claude can't watch the video, so the transcript is what lets it pick
+  // moments based on actual content instead of guessing blind from the
+  // title. Cap the size sent to keep the request well inside a normal
+  // context window even for long source videos.
+  const MAX_TRANSCRIPT_CHARS = 60000;
 
-    if (frames.length === 0) {
-      throw new Error(
-        "No frames could be extracted from the source video.",
-      );
-    }
+  const transcriptText =
+    transcript && transcript.segments.length > 0
+      ? transcript.segments
+          .map(
+            (segment) =>
+              `[${segment.start.toFixed(1)}s - ${segment.end.toFixed(1)}s] ${segment.text}`,
+          )
+          .join("\n")
+          .slice(0, MAX_TRANSCRIPT_CHARS)
+      : null;
 
-    const energyText = energyWindows
-      .map(
-        (w) =>
-          `t=${w.startSec.toFixed(1)}s: ${w.meanDb.toFixed(1)} dB`,
-      )
-      .join("\n");
+  const transcriptBlock = transcriptText
+    ? `Timestamped transcript of the full video (use these exact timestamps — do not shift them):\n${transcriptText}${
+        transcriptText.length >= MAX_TRANSCRIPT_CHARS
+          ? "\n[transcript truncated for length]"
+          : ""
+      }`
+    : "No transcript is available for this video (transcription failed or was skipped). Base your picks on the title and duration only, and keep timestamps conservative.";
 
-    const promptText = `You are ClipForge AI, an expert short-form video editor for TikTok, YouTube Shorts, and Instagram Reels.
+  const prompt = `
+You are ClipForge AI, an expert video clipping and viral retention specialist.
 
-You are given ${frames.length} frames sampled evenly across a ${Math.round(duration)}-second source video (timestamps below the corresponding image), plus a rough audio loudness curve (dB per time window - louder/more energetic moments often mean more engaging delivery, but use your own visual judgment too, not just volume).
+Video title:
+"${title}"
 
-Frame timestamps (seconds): ${frames.map((f) => f.timeSec.toFixed(1)).join(", ")}
+Video duration:
+${Math.round(duration)} seconds
 
-Audio loudness curve:
-${energyText}
+Target clip duration:
+${durationTarget}
 
-Judge purely on what you see and the loudness pattern - you do NOT have a transcript, so do not invent spoken words or quotes.
+Target number of clips:
+${targetCount}
 
-Task: pick the best ${targetCount} moments (as time ranges) for vertical 9:16 clips, each ${durationTarget} seconds long, and for each pick a horizontal crop focal point for reframing widescreen footage to 9:16.
+Available viral hook patterns:
+${patternText}
 
-Return ONLY valid JSON, no commentary:
+${transcriptBlock}
+
+Find the best ${targetCount} moments that could perform well as:
+- YouTube Shorts
+- TikTok
+- Instagram Reels
+
+Base your selections on what is actually said in the transcript above — favor
+strong hooks, self-contained stories, surprising claims, useful advice, or
+emotional peaks that appear in the text, not just generic guesses.
+
+Important:
+- Timestamps must be inside the source video.
+- start must be >= 0.
+- end must be greater than start.
+- end must be <= ${duration}.
+- Use the transcript's timestamps as ground truth for where content occurs.
+- Prefer complete thoughts.
+- Prefer strong hooks.
+- Avoid starting in the middle of a sentence.
+- Avoid ending in the middle of a thought.
+- Distribute timestamps throughout the video when possible.
+- Do not invent timestamps outside the video.
+- Return ONLY valid JSON.
+
 {
   "clips": [
     {
-      "start": 12.0,
-      "end": 45.0,
-      "title": "Punchy short title",
-      "hook": "What likely grabs attention in the first 3s, based on what's visible",
-      "topic": "Main subject, inferred visually",
-      "category": "Insight | Story | How-To | Reaction | Highlight",
-      "cropX": 0.5,
-      "hookScore": 90,
-      "engagementScore": 90,
-      "emotionalScore": 85,
-      "shareabilityScore": 90,
-      "completenessScore": 92
+      "start": 0,
+      "end": 30,
+      "title": "Short title",
+      "hook": "Strong hook",
+      "topic": "Main topic",
+      "category": "Insight",
+      "patternId": null,
+      "hookScore": 95,
+      "engagementScore": 94,
+      "emotionalScore": 90,
+      "shareabilityScore": 95,
+      "completenessScore": 96
     }
   ]
 }
+`;
 
-Rules:
-- start >= 0, end <= ${Math.round(duration)}, end > start.
-- cropX is 0 (subject at left edge) to 1 (subject at right edge), 0.5 = centered. Base it on where the main subject/action sits in the frames within that time range.
-- Spread picks across the video where possible, don't cluster them all in one place.
-- Scores are 0-100 integers, your honest estimate.`;
-
-    const imageContent = frames.map((frame) => ({
-      type: "image_url",
-      image_url: {
-        url: `data:image/jpeg;base64,${frame.base64}`,
-      },
-    }));
-
+  try {
+    // Routed through OpenRouter (not api.anthropic.com directly), which
+    // normalizes every provider to the OpenAI-style chat completions
+    // response shape below.
     const response = await fetch(
-      "https://api.moonshot.ai/v1/chat/completions",
+      "https://openrouter.ai/api/v1/chat/completions",
       {
         method: "POST",
-        headers: moonshotHeaders,
+        headers: openRouterHeaders,
         body: JSON.stringify({
-          model: KIMI_VISION_MODEL,
-          response_format: { type: "json_object" },
-          max_tokens: 4096,
+          model: ANTHROPIC_MODEL,
+          // Scales with how many clips were actually requested instead of
+          // always asking for the 30-clip ceiling — a flat 8000 caused a
+          // 1-clip request to get rejected by OpenRouter for needing more
+          // credits than were available, even though it only needed a
+          // fraction of that. ~220 tokens/candidate plus a fixed baseline
+          // for JSON structure and reasoning.
+          max_tokens: Math.min(
+            8000,
+            Math.max(1200, targetCount * 220 + 600),
+          ),
           messages: [
             {
               role: "user",
-              content: [
-                { type: "text", text: promptText },
-                ...imageContent,
-              ],
+              content: prompt,
             },
           ],
         }),
@@ -1063,159 +1453,196 @@ Rules:
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText =
+        await response.text();
 
       console.warn(
-        `Kimi (Moonshot) returned ${response.status}: ${errorText}`,
+        `Claude (via OpenRouter) returned ${response.status}: ${errorText}`,
       );
 
       return createFallbackCandidates(
-      title,
-      duration,
-      targetCount,
-      durationBounds,
-    );
+        title,
+        duration,
+        targetCount,
+      );
     }
 
-    const json = (await response.json()) as any;
+    const json =
+      (await response.json()) as any;
 
     const text =
       json.choices?.[0]?.message?.content || "";
 
     if (!text) {
       console.warn(
-        "Kimi (Moonshot) returned empty content.",
+        "Claude returned empty content.",
       );
 
       return createFallbackCandidates(
-      title,
-      duration,
-      targetCount,
-      durationBounds,
-    );
+        title,
+        duration,
+        targetCount,
+      );
     }
 
-    const cleanedText = text
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
+    const cleanedText =
+      text
+        .replace(
+          /^```json\s*/i,
+          "",
+        )
+        .replace(
+          /^```\s*/i,
+          "",
+        )
+        .replace(
+          /\s*```$/i,
+          "",
+        )
+        .trim();
 
-    const parsed = JSON.parse(cleanedText);
+    const parsed =
+      JSON.parse(cleanedText);
 
     if (
       !Array.isArray(parsed.clips) ||
       parsed.clips.length === 0
     ) {
       return createFallbackCandidates(
-      title,
-      duration,
-      targetCount,
-      durationBounds,
-    );
+        title,
+        duration,
+        targetCount,
+      );
     }
 
-    const candidates: Candidate[] = parsed.clips
-      .filter((clip: any) => {
-        const start = Number(clip.start);
-        const end = Number(clip.end);
+    const patternMap =
+      new Map(
+        patterns.map(
+          (pattern) => [
+            pattern.id,
+            pattern,
+          ],
+        ),
+      );
 
-        return (
-          Number.isFinite(start) &&
-          Number.isFinite(end) &&
-          end > start &&
-          start >= 0 &&
-          end <= duration
-        );
-      })
-      .slice(0, targetCount)
-      .map((clip: any) => {
-        const rawStart = Math.max(0, Number(clip.start));
-        const rawEnd = Math.min(duration, Number(clip.end));
+    const candidates =
+      parsed.clips
+        .filter((clip: any) => {
+          const start =
+            Number(clip.start);
 
-        // Hard guarantee on clip length, regardless of what the model
-        // returned - it only gets a soft hint via the prompt text above.
-        const [minLen, maxLen] = durationBounds;
-        const rawLen = Math.max(0.1, rawEnd - rawStart);
-        const targetLen = Math.min(
-          Math.max(rawLen, minLen),
-          maxLen,
-          duration,
-        );
+          const end =
+            Number(clip.end);
 
-        // Keep the AI's chosen center point, just resize around it so the
-        // hook/moment it picked stays roughly centered in the new length.
-        const center = (rawStart + rawEnd) / 2;
-        let start = Math.max(0, center - targetLen / 2);
-        let end = start + targetLen;
-
-        if (end > duration) {
-          end = duration;
-          start = Math.max(0, end - targetLen);
-        }
-
-        const cropX = Math.min(
-          1,
-          Math.max(
+          return (
+            Number.isFinite(start) &&
+            Number.isFinite(end) &&
+            end > start &&
+            start >= 0 &&
+            end <= duration
+          );
+        })
+        .slice(0, targetCount)
+        .map((clip: any) => {
+          const start = Math.max(
             0,
-            Number.isFinite(Number(clip.cropX))
-              ? Number(clip.cropX)
-              : 0.5,
-          ),
-        );
+            Number(clip.start),
+          );
 
-        const hookScore =
-          Number(clip.hookScore) || 90;
-        const engagementScore =
-          Number(clip.engagementScore) || 90;
-        const emotionalScore =
-          Number(clip.emotionalScore) || 85;
-        const shareabilityScore =
-          Number(clip.shareabilityScore) || 90;
-        const completenessScore =
-          Number(clip.completenessScore) || 95;
+          const end = Math.min(
+            duration,
+            Number(clip.end),
+          );
 
-        const score =
-          hookScore * 0.35 +
-          engagementScore * 0.35 +
-          shareabilityScore * 0.3;
+          const pattern =
+            clip.patternId
+              ? patternMap.get(
+                  String(
+                    clip.patternId,
+                  ),
+                ) ?? null
+              : null;
 
-        return {
-          start,
-          end,
-          title: String(
-            clip.title ||
-              `Viral Moment ${title.slice(0, 30)}`,
-          ),
-          hook: String(
-            clip.hook || "Watch until the end.",
-          ),
-          topic: String(clip.topic || title),
-          category: String(
-            clip.category || "Insight",
-          ),
+          const patternScore =
+            pattern?.score ?? 50;
 
-          cropX,
+          const hookScore =
+            Number(clip.hookScore) || 90;
 
-          patternId: null,
-          patternName: null,
-          patternScore: 0,
+          const engagementScore =
+            Number(
+              clip.engagementScore,
+            ) || 90;
 
-          hookScore,
-          engagementScore,
-          emotionalScore,
-          shareabilityScore,
-          completenessScore,
-          score,
-        };
-      });
+          const emotionalScore =
+            Number(
+              clip.emotionalScore,
+            ) || 85;
+
+          const shareabilityScore =
+            Number(
+              clip.shareabilityScore,
+            ) || 90;
+
+          const completenessScore =
+            Number(
+              clip.completenessScore,
+            ) || 95;
+
+          const score =
+            hookScore * 0.3 +
+            engagementScore * 0.3 +
+            patternScore * 0.2 +
+            shareabilityScore * 0.2;
+
+          return {
+            start,
+            end,
+
+            title: String(
+              clip.title ||
+                `Viral Moment ${title.slice(
+                  0,
+                  30,
+                )}`,
+            ),
+
+            hook: String(
+              clip.hook ||
+                "Watch until the end.",
+            ),
+
+            topic: String(
+              clip.topic || title,
+            ),
+
+            category: String(
+              clip.category ||
+                "Insight",
+            ),
+
+            patternId:
+              pattern?.id ?? null,
+
+            patternName:
+              pattern?.name ?? null,
+
+            patternScore,
+            hookScore,
+            engagementScore,
+            emotionalScore,
+            shareabilityScore,
+            completenessScore,
+            score,
+          };
+        });
 
     if (candidates.length > 0) {
       return candidates;
     }
   } catch (error) {
     console.warn(
-      "Multimodal candidate generation failed:",
+      "Claude candidate generation failed:",
       error instanceof Error
         ? error.message
         : String(error),
@@ -1223,11 +1650,10 @@ Rules:
   }
 
   return createFallbackCandidates(
-      title,
-      duration,
-      targetCount,
-      durationBounds,
-    );
+    title,
+    duration,
+    targetCount,
+  );
 }
 
 // ============================================================================
@@ -1238,14 +1664,13 @@ function createFallbackCandidates(
   title: string,
   duration: number,
   targetCount: number,
-  durationBounds: [number, number] = [20, 30],
 ): Candidate[] {
   const fallback: Candidate[] = [];
 
   const clipLength =
     Math.min(
-      durationBounds[1],
-      Math.max(durationBounds[0], 3, duration),
+      30,
+      Math.max(3, duration),
     );
 
   const step =
@@ -1299,8 +1724,6 @@ function createFallbackCandidates(
       topic: title,
       category: "Highlight",
 
-      cropX: 0.5,
-
       patternId: null,
       patternName: null,
 
@@ -1327,7 +1750,6 @@ async function sliceClipVideo(
   start: number,
   end: number,
   outPath: string,
-  cropX: number = 0.5,
 ): Promise<string> {
   const duration =
     Math.max(
@@ -1335,23 +1757,10 @@ async function sliceClipVideo(
       end - start,
     );
 
-  // cropX (0-1) is the AI's pick for where the subject sits horizontally.
-  // Clamped in the filter expression too, in case cropX is ever out of range.
-  const safeCropX = Math.min(1, Math.max(0, cropX));
-
-  const cropFilter =
-    `scale=1080:1920:force_original_aspect_ratio=increase,` +
-    `crop=1080:1920:x='min(max(0,(iw-1080)*${safeCropX}),iw-1080)':y='min(max(0,(ih-1920)*0.5),ih-1920)'`;
-
   await execFileAsync(
     "ffmpeg",
     [
       "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-threads",
-      "2",
       "-ss",
       String(start),
       "-t",
@@ -1360,7 +1769,7 @@ async function sliceClipVideo(
       sourcePath,
 
       "-vf",
-      cropFilter,
+      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
 
       "-c:v",
       "libx264",
@@ -1368,6 +1777,12 @@ async function sliceClipVideo(
       "fast",
       "-crf",
       "23",
+      // Without this, libx264 auto-detects the HOST machine's CPU count
+      // (60 threads in Railway's case) rather than what the container is
+      // actually allocated, then gets silently killed by the container's
+      // resource limits partway through encoding — no ffmpeg-side error,
+      // just a dead process at frame=0. Capping threads explicitly avoids
+      // that mismatch.
       "-threads",
       "2",
 
@@ -1378,12 +1793,70 @@ async function sliceClipVideo(
 
       outPath,
     ],
-    { maxBuffer: 20 * 1024 * 1024 },
+    // Without this, ffmpeg's per-frame stderr progress output blows past
+    // Node's default 1MB buffer almost immediately once real encoding
+    // starts (stderr isn't a TTY here, so \r doesn't collapse each line),
+    // which kills the process with no clean ffmpeg-side error message.
+    { maxBuffer: 50 * 1024 * 1024 },
   );
 
   return outPath;
 }
 
+// ============================================================================
+// AUDIO EXTRACTION
+// ============================================================================
+
+async function extractClipAudio(
+  clipVideoPath: string,
+  outAudioPath: string,
+): Promise<string> {
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-y",
+      "-i",
+      clipVideoPath,
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-b:a",
+      "64k",
+      outAudioPath,
+    ],
+    { maxBuffer: 20 * 1024 * 1024 },
+  );
+
+  return outAudioPath;
+}
+
+// ============================================================================
+// PER-CLIP CAPTIONS (Google Cloud Speech-to-Text)
+// ============================================================================
+
+async function transcribeClippedAudio(
+  clipAudioPath: string,
+): Promise<{
+  words: CaptionWordConfig[];
+  text: string;
+}> {
+  const words = await callSpeechToText(clipAudioPath);
+
+  if (!words || words.length === 0) {
+    return { words: [], text: "" };
+  }
+
+  return {
+    words: words.map((w) => ({
+      text: w.text,
+      start: w.start,
+      end: w.end,
+    })),
+    text: words.map((w) => w.text).join(" "),
+  };
+}
 
 // ============================================================================
 // B-ROLL — PEXELS
@@ -1701,7 +2174,68 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 2. AI ANALYSIS
+    // 2. FULL-VIDEO AUDIO EXTRACTION + TRANSCRIPTION
+    // ----------------------------------------------------------------------
+
+    await setStatus(
+      project.id,
+      "EXTRACTING_AUDIO",
+      18,
+      null,
+    );
+
+    const fullAudioPath = path.join(
+      workDir,
+      "source_audio.mp3",
+    );
+
+    let fullTranscript: {
+      segments: FullTranscriptSegment[];
+      fullText: string;
+    } | null = null;
+
+    try {
+      await extractFullAudio(
+        sourceVideoPath,
+        fullAudioPath,
+      );
+
+      await setStatus(
+        project.id,
+        "TRANSCRIBING",
+        28,
+        null,
+      );
+
+      fullTranscript = await transcribeFullVideo(
+        fullAudioPath,
+      );
+
+      if (fullTranscript) {
+        console.log(
+          `Transcribed full video: ${fullTranscript.segments.length} segments.`,
+        );
+      } else {
+        console.warn(
+          "No full-video transcript available; Claude will fall back to title-only analysis.",
+        );
+      }
+
+      await saveFullTranscript(
+        project.id,
+        fullTranscript,
+      );
+    } catch (error) {
+      console.warn(
+        "Full-video audio extraction/transcription failed:",
+        error instanceof Error
+          ? error.message
+          : String(error),
+      );
+    }
+
+    // ----------------------------------------------------------------------
+    // 3. AI ANALYSIS
     // ----------------------------------------------------------------------
 
     await setStatus(
@@ -1711,15 +2245,43 @@ async function processProject(
       null,
     );
 
-    // Pattern-set matching removed - the AI picks moments on its own from
-    // sampled frames + audio energy, not from a user-curated category list.
+    let patterns: PatternRow[] = [];
+
+    if (project.pattern_set_id) {
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("patterns")
+        .select(
+          "id, name, category, start_signal, end_signal, score, keywords, is_active",
+        )
+        .eq(
+          "pattern_set_id",
+          project.pattern_set_id,
+        )
+        .eq(
+          "is_active",
+          true,
+        );
+
+      if (error) {
+        throw new Error(
+          `Failed to load patterns: ${error.message}`,
+        );
+      }
+
+      patterns =
+        (data ?? []) as PatternRow[];
+    }
+
     const candidates =
-      await findMomentsWithMultimodalAI(
+      await findMomentsWithClaude(
         project,
         project.name,
         meta.duration,
-        sourceVideoPath,
-        workDir,
+        patterns,
+        fullTranscript,
       );
 
     console.log(
@@ -1733,12 +2295,15 @@ async function processProject(
     }
 
     // ----------------------------------------------------------------------
-    // 3. PREPARE CLIPS
+    // 4. PREPARE CLIPS
     // ----------------------------------------------------------------------
 
+    // "GENERATING_CONFIG" matches the frontend's "Clip Generation" step
+    // (ffmpeg slicing + per-clip Speech-to-Text captions + B-roll + music all
+    // happen inside this per-clip loop below).
     await setStatus(
       project.id,
-      "CLIPPING_AND_TRANSCRIBING",
+      "GENERATING_CONFIG",
       PREPARATION_START,
       null,
     );
@@ -1846,13 +2411,29 @@ async function processProject(
         candidate.start,
         candidate.end,
         clipVideoPath,
-        candidate.cropX,
       );
 
-      // Captions no longer generated here. Single flow now: Remotion/ffmpeg
-      // renders the clip, THEN the finished render's audio goes to Google
-      // STT, THEN captions get burned in - all in ffmpegWorker.ts, one path
-      // shared by every clip regardless of where it came from.
+      // --------------------------------------------------------------------
+      // C. CAPTIONS (Speech-to-Text)
+      // --------------------------------------------------------------------
+
+      const clipAudioPath =
+        path.join(
+          workDir,
+          `clip_audio_${clip.id}.mp3`,
+        );
+
+      await extractClipAudio(
+        clipVideoPath,
+        clipAudioPath,
+      );
+
+      const {
+        words: captionWords,
+      } =
+        await transcribeClippedAudio(
+          clipAudioPath,
+        );
 
       // --------------------------------------------------------------------
       // D. UPLOAD INTERMEDIATE SOURCE
@@ -1964,7 +2545,7 @@ async function processProject(
             lineSpacing: 1.2,
           },
 
-          words: [],
+          words: captionWords,
         },
 
         broll: broll
@@ -2073,14 +2654,14 @@ async function processProject(
 
       await setStatus(
         project.id,
-        "PREPARING_RENDERS",
+        "GENERATING_CONFIG",
         preparationProgress,
         null,
       );
     }
 
     // ----------------------------------------------------------------------
-    // 4. VERIFY JOBS
+    // 5. VERIFY JOBS
     // ----------------------------------------------------------------------
 
     if (
@@ -2096,7 +2677,7 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 5. HAND OFF TO REMOTION
+    // 6. HAND OFF TO REMOTION
     // ----------------------------------------------------------------------
 
     await setStatus(
@@ -2107,7 +2688,7 @@ async function processProject(
     );
 
     // ----------------------------------------------------------------------
-    // 6. WAIT FOR ONLY THESE REMOTION JOBS
+    // 7. WAIT FOR ONLY THESE REMOTION JOBS
     // ----------------------------------------------------------------------
 
     await waitForRemotionRenders(
